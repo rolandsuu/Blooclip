@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 
 type CreateUploadResponse = {
   videoId: string;
@@ -41,16 +42,15 @@ function isCreateUploadResponse(data: unknown): data is CreateUploadResponse {
 }
 
 export default function Home() {
+  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState("Choose a video");
-  const [videoId, setVideoId] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
   async function uploadVideo() {
     if (!file || isUploading) return;
 
     setIsUploading(true);
-    setVideoId(null);
 
     try {
       setStatus("Creating upload URL...");
@@ -114,8 +114,8 @@ export default function Home() {
         return;
       }
 
-      setVideoId(uploadData.videoId);
       setStatus("Upload complete");
+      router.push(`/videos/${uploadData.videoId}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Upload failed");
     } finally {
@@ -143,11 +143,6 @@ export default function Home() {
 
       <p>{status}</p>
 
-      {videoId && (
-        <p className="text-sm text-gray-600">
-          Video ID: <span className="font-mono">{videoId}</span>
-        </p>
-      )}
     </main>
   );
 }

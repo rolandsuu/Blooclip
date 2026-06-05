@@ -90,7 +90,8 @@ export async function POST(request: Request) {
     original_content_type: contentType,
     prompt,
     target_language: targetLanguage,
-    status: "queued",
+    status: "created",
+    progress: 0,
   });
 
   if (insertError) {

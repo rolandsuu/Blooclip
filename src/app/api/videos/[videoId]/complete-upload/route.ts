@@ -1,4 +1,5 @@
 import { HeadObjectCommand } from "@aws-sdk/client-s3";
+import { tasks } from "@trigger.dev/sdk/v3";
 import { NextResponse } from "next/server";
 
 import { r2, R2_BUCKET_NAME } from "@/lib/r2";
@@ -82,7 +83,11 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
 
   const { error: updateError } = await supabaseAdmin
     .from("videos")
-    .update({ status: "uploaded" })
+    .update({
+      status: "uploaded",
+      progress: 10,
+      updated_at: new Date().toISOString(),
+    })
     .eq("id", videoId);
 
   if (updateError) {
@@ -92,5 +97,49 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
     );
   }
 
-  return NextResponse.json({ videoId, status: "uploaded" });
+  let triggerRun;
+
+  try {
+    triggerRun = await tasks.trigger("process-video", {
+      videoId,
+      originalR2Key: video.original_r2_key,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to trigger processing task";
+
+    await supabaseAdmin
+      .from("videos")
+      .update({
+        status: "failed",
+        error_message: message,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", videoId);
+
+    return errorResponse(message, 500);
+  }
+
+  const { error: queueUpdateError } = await supabaseAdmin
+    .from("videos")
+    .update({
+      status: "queued",
+      progress: 15,
+      trigger_run_id: triggerRun.id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", videoId);
+
+  if (queueUpdateError) {
+    return errorResponse(
+      `Failed to mark video queued: ${queueUpdateError.message}`,
+      500
+    );
+  }
+
+  return NextResponse.json({
+    videoId,
+    status: "queued",
+    triggerRunId: triggerRun.id,
+  });
 }
