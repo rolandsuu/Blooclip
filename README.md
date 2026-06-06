@@ -2,6 +2,25 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+Required environment variables:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+SUPABASE_SECRET_KEY=
+R2_BUCKET_NAME=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=
+R2_ENDPOINT=
+TRIGGER_SECRET_KEY=
+ASSEMBLYAI_API_KEY=
+```
+
+`ASSEMBLYAI_BASE_URL` is optional and defaults to `https://api.assemblyai.com`.
+
+Before running the transcript worker, apply the Supabase migration in
+`supabase/migrations/20260606000000_add_worker_artifact_fields.sql`.
+
 First, run the development server:
 
 ```bash

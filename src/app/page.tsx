@@ -114,7 +114,7 @@ export default function Home() {
         return;
       }
 
-      setStatus("Upload complete");
+      setStatus("Upload verified");
       router.push(`/videos/${uploadData.videoId}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Upload failed");

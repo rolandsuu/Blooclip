@@ -14,8 +14,14 @@ type VideoStatusRow = {
   id: string;
   status: string;
   progress: number | null;
+  current_stage: string | null;
   error_message: string | null;
+  error_code: string | null;
+  error_provider: string | null;
+  provider_request_id: string | null;
+  retryable: boolean | null;
   final_r2_key: string | null;
+  transcript_r2_key: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -34,7 +40,7 @@ export async function GET(_request: Request, context: VideoContext) {
   const { data, error } = await supabaseAdmin
     .from("videos")
     .select(
-      "id,status,progress,error_message,final_r2_key,created_at,updated_at"
+      "id,status,progress,current_stage,error_message,error_code,error_provider,provider_request_id,retryable,final_r2_key,transcript_r2_key,created_at,updated_at"
     )
     .eq("id", videoId)
     .single();
@@ -53,7 +59,13 @@ export async function GET(_request: Request, context: VideoContext) {
     id: video.id,
     status: video.status,
     progress: video.progress ?? 0,
+    currentStage: video.current_stage,
     errorMessage: video.error_message,
+    errorCode: video.error_code,
+    provider: video.error_provider,
+    providerRequestId: video.provider_request_id,
+    retryable: video.retryable,
+    transcriptReady: Boolean(video.transcript_r2_key),
     downloadReady: video.status === "completed" && Boolean(video.final_r2_key),
     createdAt: video.created_at,
     updatedAt: video.updated_at,

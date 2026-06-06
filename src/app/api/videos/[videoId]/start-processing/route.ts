@@ -1,4 +1,5 @@
 import { HeadObjectCommand } from "@aws-sdk/client-s3";
+import { tasks } from "@trigger.dev/sdk/v3";
 import { NextResponse } from "next/server";
 
 import { r2, R2_BUCKET_NAME } from "@/lib/r2";
@@ -6,14 +7,15 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
 
-type CompleteUploadContext = {
+type StartProcessingContext = {
   params: Promise<{
     videoId: string;
   }>;
 };
 
-type VideoUploadRow = {
+type VideoProcessingRow = {
   id: string;
+  status: string;
   original_r2_key: string | null;
 };
 
@@ -30,7 +32,7 @@ function getHttpStatus(error: unknown) {
     : null;
 }
 
-export async function POST(_request: Request, context: CompleteUploadContext) {
+export async function POST(_request: Request, context: StartProcessingContext) {
   const { videoId } = await context.params;
 
   if (!videoId) {
@@ -39,7 +41,7 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
 
   const { data, error: selectError } = await supabaseAdmin
     .from("videos")
-    .select("id,original_r2_key")
+    .select("id,status,original_r2_key")
     .eq("id", videoId)
     .single();
 
@@ -54,10 +56,17 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
     );
   }
 
-  const video = data as VideoUploadRow | null;
+  const video = data as VideoProcessingRow | null;
 
   if (!video?.original_r2_key) {
     return errorResponse("Video record is missing an R2 object key", 500);
+  }
+
+  if (video.status !== "uploaded") {
+    return errorResponse(
+      `Video cannot start processing from status ${video.status}`,
+      409
+    );
   }
 
   try {
@@ -80,33 +89,59 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
     return errorResponse(message, 500);
   }
 
+  let triggerRun;
+
+  try {
+    triggerRun = await tasks.trigger("process-video", {
+      videoId,
+      originalR2Key: video.original_r2_key,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to trigger processing task";
+
+    await supabaseAdmin
+      .from("videos")
+      .update({
+        status: "failed",
+        current_stage: "queued",
+        error_message: message,
+        error_code: "trigger_failed",
+        error_provider: "trigger.dev",
+        retryable: true,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", videoId);
+
+    return errorResponse(message, 500);
+  }
+
   const { error: updateError } = await supabaseAdmin
     .from("videos")
     .update({
-      status: "uploaded",
-      progress: 0,
-      current_stage: "uploaded",
+      status: "queued",
+      progress: 5,
+      current_stage: "queued",
+      trigger_run_id: triggerRun.id,
       error_message: null,
       error_code: null,
       error_provider: null,
       provider_request_id: null,
       retryable: null,
-      transcript_r2_key: null,
-      provider_run_ids: {},
-      trigger_run_id: null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", videoId);
 
   if (updateError) {
     return errorResponse(
-      `Failed to mark video uploaded: ${updateError.message}`,
+      `Failed to mark video queued: ${updateError.message}`,
       500
     );
   }
 
   return NextResponse.json({
     videoId,
-    status: "uploaded",
+    status: "queued",
+    triggerRunId: triggerRun.id,
   });
 }

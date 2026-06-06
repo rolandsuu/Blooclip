@@ -1,0 +1,11 @@
+alter table videos add column if not exists current_stage text;
+alter table videos add column if not exists error_code text;
+alter table videos add column if not exists error_provider text;
+alter table videos add column if not exists provider_request_id text;
+alter table videos add column if not exists retryable boolean;
+alter table videos add column if not exists transcript_r2_key text;
+alter table videos add column if not exists visual_timeline_r2_key text;
+alter table videos add column if not exists edit_plan_r2_key text;
+alter table videos add column if not exists voiceover_script_r2_key text;
+alter table videos add column if not exists subtitle_r2_key text;
+alter table videos add column if not exists provider_run_ids jsonb not null default '{}'::jsonb;

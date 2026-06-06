@@ -7,7 +7,9 @@ type VideoStatus = {
   id: string;
   status: string;
   progress: number;
+  currentStage: string | null;
   errorMessage: string | null;
+  transcriptReady: boolean;
   downloadReady: boolean;
 };
 
@@ -36,6 +38,8 @@ export default function VideoPage() {
   const [video, setVideo] = useState<VideoStatus | null>(null);
   const [message, setMessage] = useState("Loading video status...");
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -107,8 +111,76 @@ export default function VideoPage() {
     }
   }
 
+  async function startProcessing() {
+    if (isStarting || !video) return;
+
+    setIsStarting(true);
+
+    try {
+      const response = await fetch(
+        `/api/videos/${params.videoId}/start-processing`,
+        {
+          method: "POST",
+        }
+      );
+
+      if (!response.ok) {
+        setMessage(await readErrorMessage(response, "Failed to start worker"));
+        return;
+      }
+
+      setVideo({
+        ...video,
+        status: "queued",
+        currentStage: "queued",
+        progress: 5,
+        errorMessage: null,
+      });
+      setMessage("Worker queued");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Start failed");
+    } finally {
+      setIsStarting(false);
+    }
+  }
+
+  async function cancelVideo() {
+    if (isCanceling || !video) return;
+
+    setIsCanceling(true);
+
+    try {
+      const response = await fetch(`/api/videos/${params.videoId}/cancel`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        setMessage(await readErrorMessage(response, "Failed to cancel video"));
+        return;
+      }
+
+      setVideo({
+        ...video,
+        status: "failed",
+        currentStage: "canceled",
+        errorMessage: "Processing canceled by user",
+        downloadReady: false,
+      });
+      setMessage("Processing canceled");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Cancel failed");
+    } finally {
+      setIsCanceling(false);
+    }
+  }
+
   const progress = Math.max(0, Math.min(100, video?.progress ?? 0));
+  const canStart = !isStarting && video?.status === "uploaded";
   const canDownload = Boolean(video?.downloadReady) && !isDownloading;
+  const canCancel =
+    !isCanceling &&
+    !video?.transcriptReady &&
+    (video?.status === "queued" || video?.status === "processing");
 
   return (
     <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center gap-6 p-6">
@@ -121,6 +193,11 @@ export default function VideoPage() {
         <div className="flex items-center justify-between gap-4 text-sm">
           <span>Status</span>
           <span className="font-mono">{video?.status ?? "loading"}</span>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 text-sm">
+          <span>Stage</span>
+          <span className="font-mono">{video?.currentStage ?? "loading"}</span>
         </div>
 
         <div className="h-3 overflow-hidden rounded bg-gray-200">
@@ -140,11 +217,27 @@ export default function VideoPage() {
       )}
 
       <button
+        onClick={startProcessing}
+        disabled={!canStart}
+        className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
+      >
+        {isStarting ? "Starting..." : "Start Processing"}
+      </button>
+
+      <button
         onClick={downloadVideo}
         disabled={!canDownload}
         className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
       >
         {isDownloading ? "Preparing Download..." : "Download Final Video"}
+      </button>
+
+      <button
+        onClick={cancelVideo}
+        disabled={!canCancel}
+        className="rounded border border-gray-300 px-4 py-2 disabled:opacity-40"
+      >
+        {isCanceling ? "Canceling..." : "Cancel Processing"}
       </button>
 
       <p className="text-sm text-gray-500">{message}</p>
