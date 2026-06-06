@@ -92,6 +92,8 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
       provider_request_id: null,
       retryable: null,
       transcript_r2_key: null,
+      visual_timeline_r2_key: null,
+      edit_plan_r2_key: null,
       provider_run_ids: {},
       trigger_run_id: null,
       updated_at: new Date().toISOString(),

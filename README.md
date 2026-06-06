@@ -14,11 +14,18 @@ R2_SECRET_ACCESS_KEY=
 R2_ENDPOINT=
 TRIGGER_SECRET_KEY=
 ASSEMBLYAI_API_KEY=
+OPENAI_API_KEY=
+OPENAI_WORKER_MODEL=gpt-5-mini
 ```
 
 `ASSEMBLYAI_BASE_URL` is optional and defaults to `https://api.assemblyai.com`.
+`OPENAI_BASE_URL` is optional and defaults to `https://api.openai.com/v1`.
+`OPENAI_WORKER_MODEL` is optional and defaults to `gpt-5-mini`.
+`VISUAL_FRAME_SAMPLE_INTERVAL_SECONDS` and
+`VISUAL_FRAME_SAMPLE_MAX_FRAMES` are optional visual-analysis worker settings
+and default to `3` and `30`.
 
-Before running the transcript worker, apply the Supabase migration in
+Before running the worker, apply the Supabase migration in
 `supabase/migrations/20260606000000_add_worker_artifact_fields.sql`.
 
 First, run the development server:

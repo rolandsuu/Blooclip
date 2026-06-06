@@ -128,6 +128,10 @@ export async function POST(_request: Request, context: StartProcessingContext) {
       error_provider: null,
       provider_request_id: null,
       retryable: null,
+      transcript_r2_key: null,
+      visual_timeline_r2_key: null,
+      edit_plan_r2_key: null,
+      provider_run_ids: {},
       updated_at: new Date().toISOString(),
     })
     .eq("id", videoId);
