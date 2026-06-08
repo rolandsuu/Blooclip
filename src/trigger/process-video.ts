@@ -1,7 +1,7 @@
 import { task } from "@trigger.dev/sdk/v3";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -32,7 +32,11 @@ type WorkerStage =
   | "analyzing_visuals"
   | "visual_analysis_ready"
   | "planning_segments"
-  | "edit_plan_ready";
+  | "edit_plan_ready"
+  | "writing_script"
+  | "generating_voiceover"
+  | "building_subtitles"
+  | "voiceover_subtitles_ready";
 
 type AssemblyAiSubmitResponse = {
   id?: unknown;
@@ -57,6 +61,28 @@ type SampledFrame = {
   sizeBytes: number;
 };
 
+type GlossaryRule = {
+  term: string;
+  caseSensitive: boolean;
+  notes: string | null;
+  mode: "do_not_translate" | "use_override";
+  targetLanguage: string;
+  resolvedText: string;
+};
+
+type PronunciationDictionaryLocator = {
+  pronunciation_dictionary_id: string;
+  version_id: string;
+};
+
+type BrandLanguageContext = {
+  source: "none" | "brand_kit";
+  version: string | null;
+  targetLanguage: string;
+  glossaryRules: GlossaryRule[];
+  pronunciationDictionaryLocators: PronunciationDictionaryLocator[];
+};
+
 type OpenAiResponsesResponse = {
   id?: unknown;
   status?: unknown;
@@ -79,6 +105,10 @@ const STAGE_PROGRESS: Record<WorkerStage, number> = {
   visual_analysis_ready: 48,
   planning_segments: 60,
   edit_plan_ready: 60,
+  writing_script: 70,
+  generating_voiceover: 80,
+  building_subtitles: 86,
+  voiceover_subtitles_ready: 88,
 };
 
 const ASSEMBLYAI_PROVIDER = "assemblyai";
@@ -88,11 +118,19 @@ const ASSEMBLYAI_POLL_INTERVAL_MS = 3000;
 const OPENAI_PROVIDER = "openai";
 const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL = "gpt-5-mini";
+const ELEVENLABS_PROVIDER = "elevenlabs";
+const ELEVENLABS_DEFAULT_BASE_URL = "https://api.elevenlabs.io/v1";
+const ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2";
+const ELEVENLABS_DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
 const DEFAULT_FRAME_SAMPLE_INTERVAL_SECONDS = 3;
 const DEFAULT_MAX_VISUAL_FRAMES = 30;
 const MAX_TRANSCRIPT_CONTEXT_CHARS = 6000;
 const MAX_EDIT_PLAN_UTTERANCES = 80;
 const MAX_EDIT_PLAN_WORDS = 300;
+const MIN_EDIT_SEGMENT_DURATION_SECONDS = 0.25;
+const MAX_SUBTITLE_CHARS = 44;
+const MAX_SUBTITLE_DURATION_SECONDS = 4.5;
+const MIN_SUBTITLE_DURATION_SECONDS = 0.35;
 const VISUAL_TIMELINE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -238,6 +276,7 @@ const EDIT_PLAN_SCHEMA = {
     },
     tutorialSteps: {
       type: "array",
+      minItems: 1,
       description:
         "The logical tutorial step sequence inferred before selecting clips. Must contain at least one step.",
       items: {
@@ -247,6 +286,7 @@ const EDIT_PLAN_SCHEMA = {
         properties: {
           stepIndex: {
             type: "integer",
+            minimum: 1,
             description: "One-based tutorial step index.",
           },
           title: {
@@ -267,6 +307,7 @@ const EDIT_PLAN_SCHEMA = {
     },
     segments: {
       type: "array",
+      minItems: 1,
       description:
         "Selected source ranges for the final tutorial edit. Must contain at least one segment.",
       items: {
@@ -285,10 +326,12 @@ const EDIT_PLAN_SCHEMA = {
         properties: {
           segmentIndex: {
             type: "integer",
+            minimum: 1,
             description: "One-based selected segment index.",
           },
           tutorialStepIndex: {
             type: "integer",
+            minimum: 1,
             description:
               "The tutorial step index this selected segment supports.",
           },
@@ -320,6 +363,8 @@ const EDIT_PLAN_SCHEMA = {
           },
           confidence: {
             type: "number",
+            minimum: 0,
+            maximum: 1,
             description: "Confidence from 0 to 1.",
           },
         },
@@ -355,6 +400,43 @@ const EDIT_PLAN_SCHEMA = {
       items: { type: "string" },
       description:
         "Planning limitations, including weak tutorial evidence or sparse frame sampling.",
+    },
+  },
+} as const;
+const VOICEOVER_SCRIPT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "script",
+    "targetLanguage",
+    "selectedDurationSeconds",
+    "estimatedSpeakingSeconds",
+    "warnings",
+  ],
+  properties: {
+    script: {
+      type: "string",
+      description:
+        "Plain narration text only. No markdown, timestamps, labels, stage directions, or phonetic replacements.",
+    },
+    targetLanguage: {
+      type: "string",
+      description: "The target language requested by the worker.",
+    },
+    selectedDurationSeconds: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description: "Total selected visual segment duration in seconds.",
+    },
+    estimatedSpeakingSeconds: {
+      type: "number",
+      exclusiveMinimum: 0,
+      description: "Estimated duration of the generated voiceover.",
+    },
+    warnings: {
+      type: "array",
+      items: { type: "string" },
+      description: "Script limitations or tradeoffs. Can be empty.",
     },
   },
 } as const;
@@ -605,6 +687,45 @@ function getOpenAiConfig() {
   };
 }
 
+function getElevenLabsConfig() {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+
+  if (!apiKey) {
+    throw new WorkerError(
+      "Missing ElevenLabs API key. Set ELEVENLABS_API_KEY.",
+      {
+        code: "elevenlabs_api_key_missing",
+        provider: ELEVENLABS_PROVIDER,
+        retryable: false,
+      }
+    );
+  }
+
+  if (!voiceId) {
+    throw new WorkerError(
+      "Missing ElevenLabs voice ID. Set ELEVENLABS_VOICE_ID.",
+      {
+        code: "elevenlabs_voice_id_missing",
+        provider: ELEVENLABS_PROVIDER,
+        retryable: false,
+      }
+    );
+  }
+
+  return {
+    apiKey,
+    voiceId,
+    baseUrl: normalizeBaseUrl(
+      process.env.ELEVENLABS_BASE_URL ?? ELEVENLABS_DEFAULT_BASE_URL
+    ),
+    modelId: process.env.ELEVENLABS_MODEL_ID ?? ELEVENLABS_DEFAULT_MODEL,
+    outputFormat:
+      process.env.ELEVENLABS_OUTPUT_FORMAT ??
+      ELEVENLABS_DEFAULT_OUTPUT_FORMAT,
+  };
+}
+
 function getFrameSamplingConfig() {
   return {
     intervalSeconds: getPositiveNumberEnv(
@@ -636,6 +757,7 @@ function getProviderRequestId(response: Response) {
   return (
     response.headers.get("x-request-id") ??
     response.headers.get("request-id") ??
+    response.headers.get("xi-request-id") ??
     null
   );
 }
@@ -964,6 +1086,70 @@ function getOpenAiErrorMessage(body: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function getElevenLabsErrorMessage(body: unknown, fallback: string) {
+  if (body && typeof body === "object") {
+    if ("detail" in body) {
+      const detail = (body as { detail?: unknown }).detail;
+
+      if (typeof detail === "string" && detail.trim()) {
+        return detail;
+      }
+
+      if (Array.isArray(detail) && detail.length > 0) {
+        return JSON.stringify(detail);
+      }
+
+      if (detail && typeof detail === "object") {
+        const message = (detail as { message?: unknown }).message;
+
+        if (typeof message === "string" && message.trim()) {
+          return message;
+        }
+
+        return JSON.stringify(detail);
+      }
+    }
+
+    if ("message" in body) {
+      const message = (body as { message?: unknown }).message;
+
+      if (typeof message === "string" && message.trim()) {
+        return message;
+      }
+    }
+  }
+
+  if (typeof body === "string" && body.trim()) {
+    return body;
+  }
+
+  return fallback;
+}
+
+function getRequestIdFromRecord(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const requestId = value.request_id;
+
+  return typeof requestId === "string" && requestId.trim()
+    ? requestId
+    : null;
+}
+
+function getElevenLabsProviderRequestId(response: Response, body: unknown) {
+  if (isRecord(body)) {
+    return (
+      getProviderRequestId(response) ??
+      getRequestIdFromRecord(body) ??
+      getRequestIdFromRecord(body.detail)
+    );
+  }
+
+  return getProviderRequestId(response);
 }
 
 function extractOpenAiOutputText(body: OpenAiResponsesResponse) {
@@ -1308,6 +1494,34 @@ function validateEditPlan(
     );
   }
 
+  const tutorialStepIndexes = new Set<number>();
+
+  for (const [index, tutorialStep] of tutorialSteps.entries()) {
+    const tutorialStepNumber = index + 1;
+
+    if (!isRecord(tutorialStep)) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan tutorial step ${tutorialStepNumber} was invalid`,
+        providerRequestId
+      );
+    }
+
+    const stepIndex = tutorialStep.stepIndex;
+
+    if (
+      typeof stepIndex !== "number" ||
+      !Number.isInteger(stepIndex) ||
+      stepIndex <= 0
+    ) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan tutorial step ${tutorialStepNumber} has an invalid stepIndex`,
+        providerRequestId
+      );
+    }
+
+    tutorialStepIndexes.add(stepIndex);
+  }
+
   const segments = editPlan.segments;
 
   if (!Array.isArray(segments) || segments.length === 0) {
@@ -1330,8 +1544,33 @@ function validateEditPlan(
       );
     }
 
+    const segmentIndex = segment.segmentIndex;
+    const tutorialStepIndex = segment.tutorialStepIndex;
     const sourceStart = segment.sourceStart;
     const sourceEnd = segment.sourceEnd;
+    const confidence = segment.confidence;
+
+    if (
+      typeof segmentIndex !== "number" ||
+      !Number.isInteger(segmentIndex) ||
+      segmentIndex <= 0
+    ) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan segment ${segmentNumber} has an invalid segmentIndex`,
+        providerRequestId
+      );
+    }
+
+    if (
+      typeof tutorialStepIndex !== "number" ||
+      !Number.isInteger(tutorialStepIndex) ||
+      !tutorialStepIndexes.has(tutorialStepIndex)
+    ) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan segment ${segmentNumber} references a missing tutorial step`,
+        providerRequestId
+      );
+    }
 
     if (typeof sourceStart !== "number" || typeof sourceEnd !== "number") {
       throwEditPlanValidationError(
@@ -1354,6 +1593,13 @@ function validateEditPlan(
       );
     }
 
+    if (sourceEnd - sourceStart < MIN_EDIT_SEGMENT_DURATION_SECONDS) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan segment ${segmentNumber} is too short to render safely`,
+        providerRequestId
+      );
+    }
+
     if (sourceStart < 0 || sourceEnd > durationSeconds) {
       throwEditPlanValidationError(
         `OpenAI edit plan segment ${segmentNumber} is outside the source video duration`,
@@ -1371,6 +1617,18 @@ function validateEditPlan(
     if (sourceStart < previousEnd) {
       throwEditPlanValidationError(
         `OpenAI edit plan segment ${segmentNumber} overlaps the previous segment`,
+        providerRequestId
+      );
+    }
+
+    if (
+      typeof confidence !== "number" ||
+      !Number.isFinite(confidence) ||
+      confidence < 0 ||
+      confidence > 1
+    ) {
+      throwEditPlanValidationError(
+        `OpenAI edit plan segment ${segmentNumber} has invalid confidence`,
         providerRequestId
       );
     }
@@ -1493,6 +1751,776 @@ async function planTutorialSegments(options: {
   };
 }
 
+type EditPlanArtifact = Awaited<ReturnType<typeof planTutorialSegments>> &
+  Record<string, unknown>;
+
+type ElevenLabsAlignment = {
+  characters: string[];
+  characterStartTimesSeconds: number[];
+  characterEndTimesSeconds: number[];
+};
+
+type SubtitleWord = {
+  text: string;
+  startSeconds: number;
+  endSeconds: number;
+};
+
+type SubtitleCue = {
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+};
+
+async function resolveBrandLanguageContext(
+  _videoId: string,
+  targetLanguage: string
+): Promise<BrandLanguageContext> {
+  return {
+    source: "none",
+    version: null,
+    targetLanguage,
+    glossaryRules: [],
+    pronunciationDictionaryLocators: [],
+  };
+}
+
+function getSelectedDurationSeconds(editPlan: EditPlanArtifact) {
+  const segments = Array.isArray(editPlan.segments) ? editPlan.segments : [];
+
+  return roundSeconds(
+    segments.reduce((total, segment) => {
+      if (!isRecord(segment)) {
+        return total;
+      }
+
+      const sourceStart = segment.sourceStart;
+      const sourceEnd = segment.sourceEnd;
+
+      if (typeof sourceStart !== "number" || typeof sourceEnd !== "number") {
+        return total;
+      }
+
+      return total + Math.max(0, sourceEnd - sourceStart);
+    }, 0)
+  );
+}
+
+function compactEditPlanForVoiceover(editPlan: EditPlanArtifact) {
+  return {
+    tutorialGoal: editPlan.tutorialGoal,
+    tutorialSteps: editPlan.tutorialSteps,
+    segments: editPlan.segments,
+    warnings: editPlan.warnings,
+  };
+}
+
+function buildVoiceoverScriptInstructions(options: {
+  prompt: string;
+  targetLanguage: string;
+  selectedDurationSeconds: number;
+  transcript: AssemblyAiTranscriptResponse;
+  visualTimeline: VisualTimelineArtifact;
+  editPlan: EditPlanArtifact;
+  brandLanguageContext: BrandLanguageContext;
+}) {
+  return [
+    "Write the final voiceover narration for a tutorial video edit.",
+    "Return JSON only, following the required schema. Do not return markdown.",
+    "The script field must contain plain narration only.",
+    "Do not include speaker labels, timestamps, stage directions, markdown, bullet lists, or JSON inside the script field.",
+    "Do not use phonetic replacements in visible script text.",
+    "Brand terms must remain visible as real terms, for example Vidocu, not vee-doh-cuh.",
+    "Glossary rules control visible text. Pronunciation dictionaries control speech only.",
+    "",
+    `User prompt: ${options.prompt}`,
+    `Target language: ${options.targetLanguage}`,
+    `Selected visual duration: ${options.selectedDurationSeconds}s`,
+    "",
+    "Write narration that fits the selected visual duration at a natural speaking pace.",
+    "Use the selected segments as the source of truth for what the final viewer will see.",
+    "Preserve tutorial logic and explain the selected actions clearly.",
+    "",
+    "Brand-language glossary rules for visible text:",
+    JSON.stringify(options.brandLanguageContext.glossaryRules, null, 2),
+    "",
+    "Transcript context:",
+    JSON.stringify(compactTranscriptForEditPlan(options.transcript), null, 2),
+    "",
+    "Visual timeline context:",
+    JSON.stringify(
+      compactVisualTimelineForEditPlan(options.visualTimeline),
+      null,
+      2
+    ),
+    "",
+    "Selected edit plan:",
+    JSON.stringify(compactEditPlanForVoiceover(options.editPlan), null, 2),
+  ].join("\n");
+}
+
+function throwVoiceoverScriptValidationError(
+  message: string,
+  providerRequestId: string | null
+): never {
+  throw new WorkerError(message, {
+    code: "openai_voiceover_script_validation_failed",
+    provider: OPENAI_PROVIDER,
+    providerRequestId,
+    retryable: true,
+  });
+}
+
+function normalizeLanguage(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function isObviousMarkdownOrStructuredText(script: string) {
+  const trimmed = script.trim();
+
+  return (
+    trimmed.startsWith("```") ||
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+    /^#{1,6}\s+/m.test(trimmed) ||
+    /^\s*[-*]\s+/m.test(trimmed) ||
+    /^\s*\d+\.\s+/m.test(trimmed) ||
+    /\*\*[^*]+\*\*/.test(trimmed)
+  );
+}
+
+function hasSpeakerLabelsOrTiming(script: string) {
+  return (
+    /^\s*(?:narrator|voiceover|vo|speaker(?:\s+\d+)?)\s*:/im.test(script) ||
+    /\b\d{1,2}:\d{2}(?::\d{2})?\b/.test(script) ||
+    /\[\s*\d+(?:\.\d+)?\s*s?\s*\]/i.test(script)
+  );
+}
+
+function hasStageDirections(script: string) {
+  return /(?:\[(?:pause|music|cut|show|scene|fade)[^\]]*\]|\((?:pause|music|cut|show|scene|fade)[^)]*\))/i.test(
+    script
+  );
+}
+
+function validateVoiceoverScript(
+  value: Record<string, unknown>,
+  requestedTargetLanguage: string,
+  providerRequestId: string | null
+): {
+  script: string;
+  targetLanguage: string;
+  selectedDurationSeconds: number;
+  estimatedSpeakingSeconds: number;
+  warnings: string[];
+} {
+  const script = value.script;
+  const targetLanguage = value.targetLanguage;
+  const selectedDurationSeconds = value.selectedDurationSeconds;
+  const estimatedSpeakingSeconds = value.estimatedSpeakingSeconds;
+  const warnings = value.warnings;
+
+  if (typeof script !== "string" || !script.trim()) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script must contain a non-empty script",
+      providerRequestId
+    );
+  }
+
+  const trimmedScript = script.trim();
+
+  if (
+    isObviousMarkdownOrStructuredText(trimmedScript) ||
+    hasSpeakerLabelsOrTiming(trimmedScript) ||
+    hasStageDirections(trimmedScript)
+  ) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script contained markdown, labels, timing, or stage directions",
+      providerRequestId
+    );
+  }
+
+  if (
+    typeof targetLanguage !== "string" ||
+    normalizeLanguage(targetLanguage) !== normalizeLanguage(requestedTargetLanguage)
+  ) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script targetLanguage did not match the requested target language",
+      providerRequestId
+    );
+  }
+
+  if (
+    typeof selectedDurationSeconds !== "number" ||
+    !Number.isFinite(selectedDurationSeconds) ||
+    selectedDurationSeconds <= 0
+  ) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script selectedDurationSeconds was invalid",
+      providerRequestId
+    );
+  }
+
+  if (
+    typeof estimatedSpeakingSeconds !== "number" ||
+    !Number.isFinite(estimatedSpeakingSeconds) ||
+    estimatedSpeakingSeconds <= 0
+  ) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script estimatedSpeakingSeconds was invalid",
+      providerRequestId
+    );
+  }
+
+  if (!Array.isArray(warnings) || warnings.some((item) => typeof item !== "string")) {
+    throwVoiceoverScriptValidationError(
+      "OpenAI voiceover script warnings must be an array of strings",
+      providerRequestId
+    );
+  }
+
+  return {
+    script: trimmedScript,
+    targetLanguage,
+    selectedDurationSeconds,
+    estimatedSpeakingSeconds,
+    warnings,
+  };
+}
+
+async function generateVoiceoverScript(options: {
+  videoId: string;
+  sourceR2Key: string;
+  transcriptR2Key: string;
+  visualTimelineR2Key: string;
+  editPlanR2Key: string;
+  voiceoverR2Key: string;
+  subtitleR2Key: string;
+  prompt: string;
+  targetLanguage: string;
+  transcript: AssemblyAiTranscriptResponse;
+  visualTimeline: VisualTimelineArtifact;
+  editPlan: EditPlanArtifact;
+  brandLanguageContext: BrandLanguageContext;
+}) {
+  const { apiKey, baseUrl, model } = getOpenAiConfig();
+  const selectedDurationSeconds = getSelectedDurationSeconds(options.editPlan);
+  const response = await fetch(`${baseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: buildVoiceoverScriptInstructions({
+                prompt: options.prompt,
+                targetLanguage: options.targetLanguage,
+                selectedDurationSeconds,
+                transcript: options.transcript,
+                visualTimeline: options.visualTimeline,
+                editPlan: options.editPlan,
+                brandLanguageContext: options.brandLanguageContext,
+              }),
+            },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "voiceover_script",
+          strict: true,
+          schema: VOICEOVER_SCRIPT_SCHEMA,
+        },
+      },
+      max_output_tokens: 3000,
+      store: false,
+    }),
+  });
+
+  const body = (await readJsonResponse(response)) as OpenAiResponsesResponse;
+  const requestId = getProviderRequestId(response);
+
+  if (!response.ok) {
+    throw new WorkerError(
+      getOpenAiErrorMessage(
+        body,
+        `OpenAI voiceover script generation failed with HTTP ${response.status}`
+      ),
+      {
+        code: "openai_voiceover_script_failed",
+        provider: OPENAI_PROVIDER,
+        providerRequestId: requestId,
+        retryable: response.status === 429 || response.status >= 500,
+      }
+    );
+  }
+
+  const outputText = body ? extractOpenAiOutputText(body) : null;
+  const providerRequestId =
+    typeof body?.id === "string" ? body.id : requestId ?? null;
+
+  if (!outputText) {
+    throw new WorkerError(
+      "OpenAI voiceover script response had no output text",
+      {
+        code: "openai_voiceover_script_output_missing",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      }
+    );
+  }
+
+  let parsedOutput: Record<string, unknown>;
+
+  try {
+    parsedOutput = parseJsonObject(outputText);
+  } catch (error) {
+    throw new WorkerError(
+      error instanceof Error
+        ? error.message
+        : "OpenAI voiceover script JSON was invalid",
+      {
+        code: "openai_voiceover_script_json_invalid",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      }
+    );
+  }
+
+  const validatedScript = validateVoiceoverScript(
+    parsedOutput,
+    options.targetLanguage,
+    providerRequestId
+  );
+
+  return {
+    videoId: options.videoId,
+    sourceR2Key: options.sourceR2Key,
+    transcriptR2Key: options.transcriptR2Key,
+    visualTimelineR2Key: options.visualTimelineR2Key,
+    editPlanR2Key: options.editPlanR2Key,
+    voiceoverR2Key: options.voiceoverR2Key,
+    subtitleR2Key: options.subtitleR2Key,
+    provider: OPENAI_PROVIDER,
+    providerRequestId,
+    model,
+    completedAt: new Date().toISOString(),
+    prompt: options.prompt,
+    targetLanguage: validatedScript.targetLanguage,
+    script: validatedScript.script,
+    selectedDurationSeconds: validatedScript.selectedDurationSeconds,
+    requestedSelectedDurationSeconds: selectedDurationSeconds,
+    estimatedSpeakingSeconds: validatedScript.estimatedSpeakingSeconds,
+    warnings: validatedScript.warnings,
+    brandLanguageContext: options.brandLanguageContext,
+    rawResponse: body,
+  };
+}
+
+function getIsoLanguageCode(targetLanguage: string) {
+  const trimmed = targetLanguage.trim();
+
+  return /^[a-z]{2}$/i.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function parseElevenLabsAlignment(value: unknown): ElevenLabsAlignment | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const characters = value.characters;
+  const starts = value.character_start_times_seconds;
+  const ends = value.character_end_times_seconds;
+
+  if (!Array.isArray(characters) || !Array.isArray(starts) || !Array.isArray(ends)) {
+    return null;
+  }
+
+  if (
+    characters.length === 0 ||
+    characters.length !== starts.length ||
+    characters.length !== ends.length
+  ) {
+    return null;
+  }
+
+  const parsedCharacters: string[] = [];
+  const parsedStarts: number[] = [];
+  const parsedEnds: number[] = [];
+  let previousStart = -Infinity;
+  let previousEnd = -Infinity;
+
+  for (let index = 0; index < characters.length; index += 1) {
+    const character = characters[index];
+    const start = starts[index];
+    const end = ends[index];
+
+    if (
+      typeof character !== "string" ||
+      typeof start !== "number" ||
+      typeof end !== "number" ||
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      start < 0 ||
+      end < start ||
+      start < previousStart ||
+      end < previousEnd
+    ) {
+      return null;
+    }
+
+    parsedCharacters.push(character);
+    parsedStarts.push(start);
+    parsedEnds.push(end);
+    previousStart = start;
+    previousEnd = end;
+  }
+
+  return {
+    characters: parsedCharacters,
+    characterStartTimesSeconds: parsedStarts,
+    characterEndTimesSeconds: parsedEnds,
+  };
+}
+
+function selectElevenLabsAlignment(
+  body: Record<string, unknown>,
+  script: string,
+  providerRequestId: string | null
+) {
+  const scriptCharacters = Array.from(script);
+  const candidates = [
+    {
+      alignment: parseElevenLabsAlignment(body.normalized_alignment),
+      usedNormalizedAlignment: true,
+    },
+    {
+      alignment: parseElevenLabsAlignment(body.alignment),
+      usedNormalizedAlignment: false,
+    },
+  ];
+
+  for (const candidate of candidates) {
+    if (
+      candidate.alignment &&
+      candidate.alignment.characters.length === scriptCharacters.length
+    ) {
+      return candidate as {
+        alignment: ElevenLabsAlignment;
+        usedNormalizedAlignment: boolean;
+      };
+    }
+  }
+
+  throw new WorkerError(
+    "ElevenLabs response did not include usable character timing alignment for the validated script",
+    {
+      code: "elevenlabs_alignment_invalid",
+      provider: ELEVENLABS_PROVIDER,
+      providerRequestId,
+      retryable: true,
+    }
+  );
+}
+
+async function generateElevenLabsVoiceover(options: {
+  script: string;
+  targetLanguage: string;
+  brandLanguageContext: BrandLanguageContext;
+  outputPath: string;
+}) {
+  const { apiKey, voiceId, baseUrl, modelId, outputFormat } =
+    getElevenLabsConfig();
+  const url = new URL(
+    `${baseUrl}/text-to-speech/${encodeURIComponent(
+      voiceId
+    )}/with-timestamps`
+  );
+  url.searchParams.set("output_format", outputFormat);
+
+  const languageCode = getIsoLanguageCode(options.targetLanguage);
+  const requestBody: Record<string, unknown> = {
+    text: options.script,
+    model_id: modelId,
+  };
+
+  if (languageCode) {
+    requestBody.language_code = languageCode;
+  }
+
+  if (
+    options.brandLanguageContext.pronunciationDictionaryLocators.length > 0
+  ) {
+    requestBody.pronunciation_dictionary_locators =
+      options.brandLanguageContext.pronunciationDictionaryLocators;
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "xi-api-key": apiKey,
+    },
+    body: JSON.stringify(requestBody),
+  });
+  const body = (await readJsonResponse(response)) as unknown;
+  const requestId = getElevenLabsProviderRequestId(response, body);
+
+  if (!response.ok) {
+    throw new WorkerError(
+      getElevenLabsErrorMessage(
+        body,
+        `ElevenLabs voiceover generation failed with HTTP ${response.status}`
+      ),
+      {
+        code: "elevenlabs_tts_failed",
+        provider: ELEVENLABS_PROVIDER,
+        providerRequestId: requestId,
+        retryable: response.status === 429 || response.status >= 500,
+      }
+    );
+  }
+
+  if (!isRecord(body) || typeof body.audio_base64 !== "string") {
+    throw new WorkerError("ElevenLabs response did not include audio_base64", {
+      code: "elevenlabs_audio_missing",
+      provider: ELEVENLABS_PROVIDER,
+      providerRequestId: requestId,
+      retryable: true,
+    });
+  }
+
+  const audioBuffer = Buffer.from(body.audio_base64, "base64");
+
+  if (audioBuffer.length === 0) {
+    throw new WorkerError("ElevenLabs produced an empty voiceover audio file", {
+      code: "elevenlabs_audio_empty",
+      provider: ELEVENLABS_PROVIDER,
+      providerRequestId: requestId,
+      retryable: true,
+    });
+  }
+
+  await writeFile(options.outputPath, audioBuffer);
+
+  const providerRequestId = requestId;
+  const { alignment, usedNormalizedAlignment } = selectElevenLabsAlignment(
+    body,
+    options.script,
+    providerRequestId
+  );
+
+  return {
+    provider: ELEVENLABS_PROVIDER,
+    providerRequestId,
+    modelId,
+    outputFormat,
+    languageCode,
+    usedNormalizedAlignment,
+    alignment,
+  };
+}
+
+function buildSubtitleWords(
+  script: string,
+  alignment: ElevenLabsAlignment
+): SubtitleWord[] {
+  const scriptCharacters = Array.from(script);
+  const words: SubtitleWord[] = [];
+  let currentText = "";
+  let currentStart: number | null = null;
+  let currentEnd: number | null = null;
+
+  function flushCurrentWord() {
+    if (!currentText || currentStart === null || currentEnd === null) {
+      return;
+    }
+
+    words.push({
+      text: currentText,
+      startSeconds: currentStart,
+      endSeconds: currentEnd,
+    });
+    currentText = "";
+    currentStart = null;
+    currentEnd = null;
+  }
+
+  for (let index = 0; index < scriptCharacters.length; index += 1) {
+    const character = scriptCharacters[index];
+    const start = alignment.characterStartTimesSeconds[index];
+    const end = alignment.characterEndTimesSeconds[index];
+
+    if (/\s/.test(character)) {
+      flushCurrentWord();
+      continue;
+    }
+
+    if (currentStart === null) {
+      currentStart = start;
+    }
+
+    currentText += character;
+    currentEnd = end;
+  }
+
+  flushCurrentWord();
+
+  if (words.length === 0) {
+    throw new WorkerError("Unable to build subtitle words from voiceover script", {
+      code: "subtitle_generation_failed",
+      retryable: true,
+    });
+  }
+
+  return words;
+}
+
+function createSubtitleCue(words: SubtitleWord[]): SubtitleCue {
+  const startSeconds = words[0].startSeconds;
+  const rawEndSeconds = words[words.length - 1].endSeconds;
+  const endSeconds = Math.max(
+    rawEndSeconds,
+    startSeconds + MIN_SUBTITLE_DURATION_SECONDS
+  );
+
+  return {
+    startSeconds,
+    endSeconds,
+    text: words.map((word) => word.text).join(" "),
+  };
+}
+
+function buildSubtitleCues(
+  script: string,
+  alignment: ElevenLabsAlignment
+): SubtitleCue[] {
+  const words = buildSubtitleWords(script, alignment);
+  const cues: SubtitleCue[] = [];
+  let currentWords: SubtitleWord[] = [];
+
+  function flushCurrentCue() {
+    if (currentWords.length === 0) {
+      return;
+    }
+
+    cues.push(createSubtitleCue(currentWords));
+    currentWords = [];
+  }
+
+  for (const word of words) {
+    if (currentWords.length > 0) {
+      const candidateText = [...currentWords, word]
+        .map((candidateWord) => candidateWord.text)
+        .join(" ");
+      const candidateDuration =
+        word.endSeconds - currentWords[0].startSeconds;
+
+      if (
+        candidateText.length > MAX_SUBTITLE_CHARS ||
+        candidateDuration > MAX_SUBTITLE_DURATION_SECONDS
+      ) {
+        flushCurrentCue();
+      }
+    }
+
+    currentWords.push(word);
+
+    const currentText = currentWords.map((currentWord) => currentWord.text).join(" ");
+
+    if (/[.!?。！？]$/.test(word.text) && currentText.length >= 20) {
+      flushCurrentCue();
+    }
+  }
+
+  flushCurrentCue();
+
+  return normalizeSubtitleCueTimings(cues);
+}
+
+function normalizeSubtitleCueTimings(cues: SubtitleCue[]) {
+  let previousEnd = 0;
+
+  return cues.map((cue, index) => {
+    const nextStart = cues[index + 1]?.startSeconds;
+    const startSeconds = Math.max(cue.startSeconds, previousEnd);
+    let endSeconds = Math.max(
+      cue.endSeconds,
+      startSeconds + MIN_SUBTITLE_DURATION_SECONDS
+    );
+
+    if (typeof nextStart === "number" && endSeconds > nextStart) {
+      endSeconds = Math.max(startSeconds + 0.05, nextStart);
+    }
+
+    previousEnd = endSeconds;
+
+    return {
+      ...cue,
+      startSeconds,
+      endSeconds,
+    };
+  });
+}
+
+function formatAssTimestamp(seconds: number) {
+  const totalCentiseconds = Math.max(0, Math.round(seconds * 100));
+  const hours = Math.floor(totalCentiseconds / 360000);
+  const minutes = Math.floor((totalCentiseconds % 360000) / 6000);
+  const wholeSeconds = Math.floor((totalCentiseconds % 6000) / 100);
+  const centiseconds = totalCentiseconds % 100;
+
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(
+    wholeSeconds
+  ).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+}
+
+function escapeAssText(text: string) {
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/{/g, "\\{")
+    .replace(/}/g, "\\}")
+    .replace(/\r?\n/g, "\\N")
+    .trim();
+}
+
+function buildAssSubtitleFile(cues: SubtitleCue[]) {
+  const dialogueLines = cues.map(
+    (cue) =>
+      `Dialogue: 0,${formatAssTimestamp(cue.startSeconds)},${formatAssTimestamp(
+        cue.endSeconds
+      )},Default,,0,0,0,,${escapeAssText(cue.text)}`
+  );
+
+  return [
+    "[Script Info]",
+    "ScriptType: v4.00+",
+    "WrapStyle: 2",
+    "ScaledBorderAndShadow: yes",
+    "PlayResX: 1080",
+    "PlayResY: 1920",
+    "",
+    "[V4+ Styles]",
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    "Style: Default,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00111111,&H99000000,-1,0,0,0,100,100,0,0,1,4,1,2,80,80,120,1",
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ...dialogueLines,
+    "",
+  ].join("\n");
+}
+
 function toWorkerError(error: unknown) {
   if (error instanceof WorkerError) {
     return error;
@@ -1516,16 +2544,23 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   let transcriptId: string | null = null;
   let openAiVisualResponseId: string | null = null;
   let openAiEditPlanResponseId: string | null = null;
+  let openAiScriptResponseId: string | null = null;
+  let elevenLabsTtsRequestId: string | null = null;
   const workDir = await mkdtemp(
     path.join(os.tmpdir(), `blooclip-${payload.videoId}-`)
   );
   const inputPath = path.join(workDir, "input.mp4");
   const audioPath = path.join(workDir, "audio.wav");
   const framesDir = path.join(workDir, "frames");
+  const voiceoverPath = path.join(workDir, "voiceover.mp3");
+  const subtitlesPath = path.join(workDir, "subtitles.ass");
   const audioR2Key = `artifacts/${payload.videoId}/audio.wav`;
   const transcriptR2Key = `artifacts/${payload.videoId}/transcript.json`;
   const visualTimelineR2Key = `artifacts/${payload.videoId}/visual-timeline.json`;
   const editPlanR2Key = `artifacts/${payload.videoId}/edit-plan.json`;
+  const voiceoverScriptR2Key = `artifacts/${payload.videoId}/voiceover-script.json`;
+  const voiceoverR2Key = `artifacts/${payload.videoId}/voiceover.mp3`;
+  const subtitleR2Key = `artifacts/${payload.videoId}/subtitles.ass`;
 
   try {
     const video = await loadVideo(payload.videoId);
@@ -1559,6 +2594,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       transcript_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
+      voiceover_script_r2_key: null,
+      subtitle_r2_key: null,
       provider_run_ids: {},
     });
 
@@ -1725,6 +2762,111 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       error_provider: null,
       retryable: null,
     });
+
+    const brandLanguageContext = await resolveBrandLanguageContext(
+      payload.videoId,
+      targetLanguage
+    );
+
+    stage = "writing_script";
+    await updateStage(payload.videoId, stage);
+    const voiceoverScript = await generateVoiceoverScript({
+      videoId: payload.videoId,
+      sourceR2Key: originalR2Key,
+      transcriptR2Key,
+      visualTimelineR2Key,
+      editPlanR2Key,
+      voiceoverR2Key,
+      subtitleR2Key,
+      prompt,
+      targetLanguage,
+      transcript,
+      visualTimeline,
+      editPlan,
+      brandLanguageContext,
+    });
+    openAiScriptResponseId =
+      typeof voiceoverScript.providerRequestId === "string"
+        ? voiceoverScript.providerRequestId
+        : null;
+    await uploadJsonToR2(voiceoverScriptR2Key, voiceoverScript);
+
+    await updateVideo(payload.videoId, {
+      status: "processing",
+      current_stage: stage,
+      progress: STAGE_PROGRESS[stage],
+      transcript_r2_key: transcriptR2Key,
+      visual_timeline_r2_key: visualTimelineR2Key,
+      edit_plan_r2_key: editPlanR2Key,
+      voiceover_script_r2_key: voiceoverScriptR2Key,
+      provider_request_id:
+        openAiScriptResponseId ??
+        openAiEditPlanResponseId ??
+        openAiVisualResponseId ??
+        transcriptId,
+      provider_run_ids: {
+        assemblyai_transcript_id: transcriptId,
+        openai_visual_response_id: openAiVisualResponseId,
+        openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_script_response_id: openAiScriptResponseId,
+      },
+      error_message: null,
+      error_code: null,
+      error_provider: null,
+      retryable: null,
+    });
+
+    stage = "generating_voiceover";
+    await updateStage(payload.videoId, stage);
+    const voiceover = await generateElevenLabsVoiceover({
+      script: voiceoverScript.script,
+      targetLanguage,
+      brandLanguageContext,
+      outputPath: voiceoverPath,
+    });
+    elevenLabsTtsRequestId =
+      typeof voiceover.providerRequestId === "string"
+        ? voiceover.providerRequestId
+        : null;
+    await uploadFileToR2(voiceoverR2Key, voiceoverPath, "audio/mpeg");
+
+    stage = "building_subtitles";
+    await updateStage(payload.videoId, stage);
+    const subtitleCues = buildSubtitleCues(
+      voiceoverScript.script,
+      voiceover.alignment
+    );
+    await writeFile(subtitlesPath, buildAssSubtitleFile(subtitleCues), "utf8");
+    await uploadFileToR2(subtitleR2Key, subtitlesPath, "text/plain");
+
+    stage = "voiceover_subtitles_ready";
+    await updateVideo(payload.videoId, {
+      status: "processing",
+      current_stage: stage,
+      progress: STAGE_PROGRESS[stage],
+      transcript_r2_key: transcriptR2Key,
+      visual_timeline_r2_key: visualTimelineR2Key,
+      edit_plan_r2_key: editPlanR2Key,
+      voiceover_script_r2_key: voiceoverScriptR2Key,
+      subtitle_r2_key: subtitleR2Key,
+      provider_request_id:
+        elevenLabsTtsRequestId ??
+        openAiScriptResponseId ??
+        openAiEditPlanResponseId ??
+        openAiVisualResponseId ??
+        transcriptId,
+      provider_run_ids: {
+        assemblyai_transcript_id: transcriptId,
+        openai_visual_response_id: openAiVisualResponseId,
+        openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_script_response_id: openAiScriptResponseId,
+        elevenlabs_tts_request_id: elevenLabsTtsRequestId,
+      },
+      error_message: null,
+      error_code: null,
+      error_provider: null,
+      retryable: null,
+    });
   } catch (error) {
     const workerError = toWorkerError(error);
     await updateVideo(payload.videoId, {
@@ -1735,6 +2877,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       error_provider: workerError.provider,
       provider_request_id:
         workerError.providerRequestId ??
+        elevenLabsTtsRequestId ??
+        openAiScriptResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
         transcriptId,

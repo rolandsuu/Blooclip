@@ -94,6 +94,8 @@ export async function POST(_request: Request, context: CompleteUploadContext) {
       transcript_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
+      voiceover_script_r2_key: null,
+      subtitle_r2_key: null,
       provider_run_ids: {},
       trigger_run_id: null,
       updated_at: new Date().toISOString(),
