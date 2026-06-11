@@ -9,7 +9,6 @@ type VideoStatus = {
   progress: number;
   currentStage: string | null;
   errorMessage: string | null;
-  transcriptReady: boolean;
   downloadReady: boolean;
 };
 
@@ -38,7 +37,6 @@ export default function VideoPage() {
   const [video, setVideo] = useState<VideoStatus | null>(null);
   const [message, setMessage] = useState("Loading video status...");
   const [isDownloading, setIsDownloading] = useState(false);
-  const [isCanceling, setIsCanceling] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -110,42 +108,8 @@ export default function VideoPage() {
     }
   }
 
-  async function cancelVideo() {
-    if (isCanceling || !video) return;
-
-    setIsCanceling(true);
-
-    try {
-      const response = await fetch(`/api/videos/${params.videoId}/cancel`, {
-        method: "POST",
-      });
-
-      if (!response.ok) {
-        setMessage(await readErrorMessage(response, "Failed to cancel video"));
-        return;
-      }
-
-      setVideo({
-        ...video,
-        status: "failed",
-        currentStage: "canceled",
-        errorMessage: "Processing canceled by user",
-        downloadReady: false,
-      });
-      setMessage("Processing canceled");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Cancel failed");
-    } finally {
-      setIsCanceling(false);
-    }
-  }
-
   const progress = Math.max(0, Math.min(100, video?.progress ?? 0));
   const canDownload = Boolean(video?.downloadReady) && !isDownloading;
-  const canCancel =
-    !isCanceling &&
-    !video?.transcriptReady &&
-    (video?.status === "queued" || video?.status === "processing");
 
   return (
     <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center gap-6 p-6">
@@ -187,14 +151,6 @@ export default function VideoPage() {
         className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
       >
         {isDownloading ? "Preparing Download..." : "Download Final Video"}
-      </button>
-
-      <button
-        onClick={cancelVideo}
-        disabled={!canCancel}
-        className="rounded border border-gray-300 px-4 py-2 disabled:opacity-40"
-      >
-        {isCanceling ? "Canceling..." : "Cancel Processing"}
       </button>
 
       <p className="text-sm text-gray-500">{message}</p>
