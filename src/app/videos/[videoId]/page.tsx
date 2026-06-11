@@ -38,7 +38,6 @@ export default function VideoPage() {
   const [video, setVideo] = useState<VideoStatus | null>(null);
   const [message, setMessage] = useState("Loading video status...");
   const [isDownloading, setIsDownloading] = useState(false);
-  const [isStarting, setIsStarting] = useState(false);
   const [isCanceling, setIsCanceling] = useState(false);
 
   useEffect(() => {
@@ -111,39 +110,6 @@ export default function VideoPage() {
     }
   }
 
-  async function startProcessing() {
-    if (isStarting || !video) return;
-
-    setIsStarting(true);
-
-    try {
-      const response = await fetch(
-        `/api/videos/${params.videoId}/start-processing`,
-        {
-          method: "POST",
-        }
-      );
-
-      if (!response.ok) {
-        setMessage(await readErrorMessage(response, "Failed to start worker"));
-        return;
-      }
-
-      setVideo({
-        ...video,
-        status: "queued",
-        currentStage: "queued",
-        progress: 5,
-        errorMessage: null,
-      });
-      setMessage("Worker queued");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Start failed");
-    } finally {
-      setIsStarting(false);
-    }
-  }
-
   async function cancelVideo() {
     if (isCanceling || !video) return;
 
@@ -175,7 +141,6 @@ export default function VideoPage() {
   }
 
   const progress = Math.max(0, Math.min(100, video?.progress ?? 0));
-  const canStart = !isStarting && video?.status === "uploaded";
   const canDownload = Boolean(video?.downloadReady) && !isDownloading;
   const canCancel =
     !isCanceling &&
@@ -215,14 +180,6 @@ export default function VideoPage() {
           {video.errorMessage}
         </p>
       )}
-
-      <button
-        onClick={startProcessing}
-        disabled={!canStart}
-        className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
-      >
-        {isStarting ? "Starting..." : "Start Processing"}
-      </button>
 
       <button
         onClick={downloadVideo}

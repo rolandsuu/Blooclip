@@ -102,7 +102,7 @@ export default function Home() {
         return;
       }
 
-      setStatus("Confirming upload...");
+      setStatus("Confirming upload and queueing worker...");
 
       const completeResponse = await fetch(
         `/api/videos/${uploadData.videoId}/complete-upload`,
@@ -118,7 +118,7 @@ export default function Home() {
         return;
       }
 
-      setStatus("Upload verified");
+      setStatus("Upload verified. Worker queued.");
       router.push(`/videos/${uploadData.videoId}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Upload failed");
