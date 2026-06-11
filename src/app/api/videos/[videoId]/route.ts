@@ -23,6 +23,8 @@ type VideoStatusRow = {
   final_r2_key: string | null;
   transcript_r2_key: string | null;
   edit_plan_r2_key: string | null;
+  instruction_doc_r2_key: string | null;
+  instruction_pdf_r2_key: string | null;
   voiceover_script_r2_key: string | null;
   subtitle_r2_key: string | null;
   created_at: string;
@@ -43,7 +45,7 @@ export async function GET(_request: Request, context: VideoContext) {
   const { data, error } = await supabaseAdmin
     .from("videos")
     .select(
-      "id,status,progress,current_stage,error_message,error_code,error_provider,provider_request_id,retryable,final_r2_key,transcript_r2_key,edit_plan_r2_key,voiceover_script_r2_key,subtitle_r2_key,created_at,updated_at"
+      "id,status,progress,current_stage,error_message,error_code,error_provider,provider_request_id,retryable,final_r2_key,transcript_r2_key,edit_plan_r2_key,instruction_doc_r2_key,instruction_pdf_r2_key,voiceover_script_r2_key,subtitle_r2_key,created_at,updated_at"
     )
     .eq("id", videoId)
     .single();
@@ -70,6 +72,8 @@ export async function GET(_request: Request, context: VideoContext) {
     retryable: video.retryable,
     transcriptReady: Boolean(video.transcript_r2_key),
     editPlanReady: Boolean(video.edit_plan_r2_key),
+    instructionReady: Boolean(video.instruction_doc_r2_key),
+    instructionPdfReady: Boolean(video.instruction_pdf_r2_key),
     voiceoverReady: Boolean(video.voiceover_script_r2_key),
     subtitlesReady: Boolean(video.subtitle_r2_key),
     downloadReady: video.status === "completed" && Boolean(video.final_r2_key),

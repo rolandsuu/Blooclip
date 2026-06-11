@@ -140,6 +140,8 @@ export async function queueVideoProcessing(
       transcript_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
+      instruction_doc_r2_key: null,
+      instruction_pdf_r2_key: null,
       voiceover_script_r2_key: null,
       subtitle_r2_key: null,
       final_r2_key: null,

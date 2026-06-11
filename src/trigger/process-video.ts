@@ -7,6 +7,14 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 
+import {
+  INSTRUCTION_DOCUMENT_SCHEMA,
+  InstructionDocumentValidationError,
+  validateInstructionDocument,
+  type InstructionDocument,
+  type InstructionDocumentArtifact,
+  type InstructionDocumentArtifactStep,
+} from "../lib/instruction-document";
 import { DEFAULT_TARGET_LANGUAGE } from "../lib/languages";
 import { r2, R2_BUCKET_NAME } from "../lib/r2";
 import { supabaseAdmin } from "../lib/supabase-admin";
@@ -34,6 +42,8 @@ type WorkerStage =
   | "visual_analysis_ready"
   | "planning_segments"
   | "edit_plan_ready"
+  | "writing_instruction_document"
+  | "instruction_document_ready"
   | "writing_script"
   | "generating_voiceover"
   | "building_subtitles"
@@ -110,7 +120,9 @@ const STAGE_PROGRESS: Record<WorkerStage, number> = {
   visual_analysis_ready: 48,
   planning_segments: 60,
   edit_plan_ready: 60,
-  writing_script: 70,
+  writing_instruction_document: 66,
+  instruction_document_ready: 68,
+  writing_script: 72,
   generating_voiceover: 80,
   building_subtitles: 86,
   voiceover_subtitles_ready: 88,
@@ -144,6 +156,17 @@ const FINAL_RENDER_WIDTH = 1080;
 const FINAL_RENDER_HEIGHT = 1920;
 const FINAL_RENDER_CRF = "23";
 const FINAL_RENDER_PRESET = "veryfast";
+const MAX_INSTRUCTION_DOCUMENT_STEPS = 12;
+const INSTRUCTION_FRAME_WIDTH = 1280;
+const PDF_PAGE_WIDTH = 595.28;
+const PDF_PAGE_HEIGHT = 841.89;
+const PDF_MARGIN = 42;
+const PDF_LINE_HEIGHT = 16;
+const PDF_FONT_SIZE = 11;
+const PDF_TITLE_FONT_SIZE = 22;
+const PDF_HEADING_FONT_SIZE = 15;
+const PDF_IMAGE_WIDTH = PDF_PAGE_WIDTH - PDF_MARGIN * 2;
+const PDF_IMAGE_HEIGHT = 220;
 const VISUAL_TIMELINE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1782,6 +1805,204 @@ async function planTutorialSegments(options: {
 type EditPlanArtifact = Awaited<ReturnType<typeof planTutorialSegments>> &
   Record<string, unknown>;
 
+type InstructionFrameAsset = {
+  stepIndex: number;
+  filePath: string;
+  r2Key: string;
+  sizeBytes: number;
+  timestampSeconds: number;
+};
+
+function compactEditPlanForInstructionDocument(editPlan: EditPlanArtifact) {
+  return {
+    tutorialGoal: editPlan.tutorialGoal,
+    tutorialSteps: editPlan.tutorialSteps,
+    segments: editPlan.segments,
+    warnings: editPlan.warnings,
+  };
+}
+
+function buildInstructionDocumentInstructions(options: {
+  prompt: string;
+  targetLanguage: string;
+  transcript: AssemblyAiTranscriptResponse;
+  visualTimeline: VisualTimelineArtifact;
+  editPlan: EditPlanArtifact;
+  sampledFrames: SampledFrame[];
+  durationSeconds: number;
+}) {
+  return [
+    "Create a step-by-step instruction document from a tutorial video.",
+    "Return JSON only, following the required schema.",
+    "All user-facing text must be written in the requested target language.",
+    "The targetLanguage field must exactly match the requested target language value.",
+    "Do not return markdown, HTML, raw script, or unsafe markup-like text.",
+    "Each step must reference exactly one key frame from the provided sampled frame list.",
+    "For keyFrame.timestampSeconds, copy the exact timestamp for the referenced visualFrameIndex.",
+    "Use the edit plan as the source of truth for the step order and supporting source ranges.",
+    `Return at most ${MAX_INSTRUCTION_DOCUMENT_STEPS} instruction steps.`,
+    "",
+    `User prompt: ${options.prompt}`,
+    `Target language: ${options.targetLanguage}`,
+    `Source video duration: ${options.durationSeconds}s`,
+    "",
+    "Sampled frame references available for keyFrame.visualFrameIndex:",
+    JSON.stringify(
+      options.sampledFrames.map((frame) => ({
+        visualFrameIndex: frame.index,
+        timestampSeconds: frame.timestampSeconds,
+      })),
+      null,
+      2
+    ),
+    "",
+    "Transcript context:",
+    JSON.stringify(compactTranscriptForEditPlan(options.transcript), null, 2),
+    "",
+    "Visual timeline context:",
+    JSON.stringify(
+      compactVisualTimelineForEditPlan(options.visualTimeline),
+      null,
+      2
+    ),
+    "",
+    "Selected edit plan:",
+    JSON.stringify(compactEditPlanForInstructionDocument(options.editPlan), null, 2),
+  ].join("\n");
+}
+
+async function generateInstructionDocument(options: {
+  videoId: string;
+  sourceR2Key: string;
+  transcriptR2Key: string;
+  visualTimelineR2Key: string;
+  editPlanR2Key: string;
+  prompt: string;
+  targetLanguage: string;
+  transcript: AssemblyAiTranscriptResponse;
+  visualTimeline: VisualTimelineArtifact;
+  editPlan: EditPlanArtifact;
+  sampledFrames: SampledFrame[];
+  durationSeconds: number;
+}) {
+  const { apiKey, baseUrl, model } = getOpenAiConfig();
+  const response = await fetch(`${baseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: buildInstructionDocumentInstructions(options),
+            },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "instruction_document",
+          strict: true,
+          schema: INSTRUCTION_DOCUMENT_SCHEMA,
+        },
+      },
+      max_output_tokens: 5000,
+      store: false,
+    }),
+  });
+
+  const body = (await readJsonResponse(response)) as OpenAiResponsesResponse;
+  const requestId = getProviderRequestId(response);
+
+  if (!response.ok) {
+    throw new WorkerError(
+      getOpenAiErrorMessage(
+        body,
+        `OpenAI instruction document generation failed with HTTP ${response.status}`
+      ),
+      {
+        code: "openai_instruction_document_failed",
+        provider: OPENAI_PROVIDER,
+        providerRequestId: requestId,
+        retryable: response.status === 429 || response.status >= 500,
+      }
+    );
+  }
+
+  const outputText = body ? extractOpenAiOutputText(body) : null;
+  const providerRequestId =
+    typeof body?.id === "string" ? body.id : requestId ?? null;
+
+  if (!outputText) {
+    throw new WorkerError(
+      "OpenAI instruction document response had no output text",
+      {
+        code: "openai_instruction_document_output_missing",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      }
+    );
+  }
+
+  let parsedOutput: Record<string, unknown>;
+
+  try {
+    parsedOutput = parseJsonObject(outputText);
+  } catch (error) {
+    throw new WorkerError(
+      error instanceof Error
+        ? error.message
+        : "OpenAI instruction document JSON was invalid",
+      {
+        code: "openai_instruction_document_json_invalid",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      }
+    );
+  }
+
+  let document: InstructionDocument;
+
+  try {
+    document = validateInstructionDocument(parsedOutput, {
+      requestedTargetLanguage: options.targetLanguage,
+      sourceDurationSeconds: options.durationSeconds,
+      frameReferences: options.sampledFrames.map((frame) => ({
+        index: frame.index,
+        timestampSeconds: frame.timestampSeconds,
+      })),
+      maxSteps: MAX_INSTRUCTION_DOCUMENT_STEPS,
+    });
+  } catch (error) {
+    if (error instanceof InstructionDocumentValidationError) {
+      throw new WorkerError(error.message, {
+        code: "openai_instruction_document_validation_failed",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      });
+    }
+
+    throw error;
+  }
+
+  return {
+    document,
+    providerRequestId,
+    model,
+    rawResponse: body,
+  };
+}
+
 type ElevenLabsAlignment = {
   characters: string[];
   characterStartTimesSeconds: number[];
@@ -2839,6 +3060,575 @@ async function renderFinalVideo(options: {
   };
 }
 
+async function extractInstructionDocumentFrames(options: {
+  videoId: string;
+  inputPath: string;
+  outputDir: string;
+  document: InstructionDocument;
+}) {
+  await mkdir(options.outputDir, { recursive: true });
+
+  const assets: InstructionFrameAsset[] = [];
+
+  for (const step of options.document.steps) {
+    const stepNumber = String(step.stepIndex).padStart(2, "0");
+    const filename = `step-${stepNumber}.jpg`;
+    const filePath = path.join(options.outputDir, filename);
+    const r2Key = `artifacts/${options.videoId}/instruction-document/frames/${filename}`;
+
+    await runFfmpeg([
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      step.keyFrame.timestampSeconds.toFixed(3),
+      "-i",
+      options.inputPath,
+      "-frames:v",
+      "1",
+      "-vf",
+      `scale=${INSTRUCTION_FRAME_WIDTH}:-2`,
+      "-q:v",
+      "2",
+      filePath,
+    ]);
+
+    const fileStats = await assertNonEmptyFile(filePath, {
+      code: "instruction_frame_empty",
+      message: "FFmpeg produced an empty instruction key frame",
+    });
+
+    assets.push({
+      stepIndex: step.stepIndex,
+      filePath,
+      r2Key,
+      sizeBytes: fileStats.size,
+      timestampSeconds: step.keyFrame.timestampSeconds,
+    });
+  }
+
+  return assets;
+}
+
+function buildInstructionDocumentArtifact(options: {
+  videoId: string;
+  sourceR2Key: string;
+  transcriptR2Key: string;
+  visualTimelineR2Key: string;
+  editPlanR2Key: string;
+  document: InstructionDocument;
+  frameAssets: InstructionFrameAsset[];
+  providerRequestId: string | null;
+  model: string;
+  rawResponse: unknown;
+  sourceDurationSeconds: number;
+}): InstructionDocumentArtifact {
+  const frameAssetByStepIndex = new Map(
+    options.frameAssets.map((asset) => [asset.stepIndex, asset])
+  );
+  const steps: InstructionDocumentArtifactStep[] = options.document.steps.map(
+    (step) => {
+      const frameAsset = frameAssetByStepIndex.get(step.stepIndex);
+
+      if (!frameAsset) {
+        throw new WorkerError(
+          `Instruction document step ${step.stepIndex} is missing an extracted frame`,
+          {
+            code: "instruction_document_frame_missing",
+            provider: "ffmpeg",
+            retryable: true,
+          }
+        );
+      }
+
+      return {
+        ...step,
+        keyFrame: {
+          ...step.keyFrame,
+          r2Key: frameAsset.r2Key,
+          sizeBytes: frameAsset.sizeBytes,
+        },
+      };
+    }
+  );
+
+  return {
+    videoId: options.videoId,
+    sourceR2Key: options.sourceR2Key,
+    transcriptR2Key: options.transcriptR2Key,
+    visualTimelineR2Key: options.visualTimelineR2Key,
+    editPlanR2Key: options.editPlanR2Key,
+    provider: OPENAI_PROVIDER,
+    providerRequestId: options.providerRequestId,
+    model: options.model,
+    completedAt: new Date().toISOString(),
+    sourceDurationSeconds: options.sourceDurationSeconds,
+    title: options.document.title,
+    overview: options.document.overview,
+    targetLanguage: options.document.targetLanguage,
+    steps,
+    warnings: options.document.warnings,
+    rawResponse: options.rawResponse,
+  };
+}
+
+function getJpegDimensions(data: Buffer) {
+  let offset = 2;
+
+  while (offset + 9 < data.length) {
+    if (data[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+
+    const marker = data[offset + 1];
+    const blockLength = data.readUInt16BE(offset + 2);
+    const isStartOfFrame =
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf);
+
+    if (isStartOfFrame) {
+      return {
+        height: data.readUInt16BE(offset + 5),
+        width: data.readUInt16BE(offset + 7),
+      };
+    }
+
+    if (blockLength <= 0) {
+      break;
+    }
+
+    offset += 2 + blockLength;
+  }
+
+  return {
+    width: INSTRUCTION_FRAME_WIDTH,
+    height: Math.round((INSTRUCTION_FRAME_WIDTH * 9) / 16),
+  };
+}
+
+function encodePdfUtf16BeHex(text: string) {
+  const utf16Le = Buffer.from(text, "utf16le");
+  const utf16Be = Buffer.alloc(utf16Le.length);
+
+  for (let index = 0; index < utf16Le.length; index += 2) {
+    utf16Be[index] = utf16Le[index + 1];
+    utf16Be[index + 1] = utf16Le[index];
+  }
+
+  return `<${utf16Be.toString("hex").toUpperCase()}>`;
+}
+
+function pdfNumber(value: number) {
+  return value.toFixed(2);
+}
+
+function estimatePdfTextWidth(text: string, fontSize: number) {
+  let units = 0;
+
+  for (const character of text) {
+    units += character.charCodeAt(0) < 128 ? 0.55 : 1;
+  }
+
+  return units * fontSize;
+}
+
+function wrapPdfText(text: string, maxWidth: number, fontSize: number) {
+  const lines: string[] = [];
+
+  for (const paragraph of text.split(/\r?\n/)) {
+    let currentLine = "";
+
+    for (const character of paragraph) {
+      const candidate = `${currentLine}${character}`;
+
+      if (currentLine && estimatePdfTextWidth(candidate, fontSize) > maxWidth) {
+        lines.push(currentLine.trimEnd());
+        currentLine = character.trimStart();
+      } else {
+        currentLine = candidate;
+      }
+    }
+
+    if (currentLine.trim()) {
+      lines.push(currentLine.trimEnd());
+    }
+  }
+
+  return lines.length > 0 ? lines : [""];
+}
+
+type PdfImageResource = {
+  name: string;
+  data: Buffer;
+  width: number;
+  height: number;
+};
+
+type PdfPage = {
+  operations: string[];
+  imageNames: string[];
+};
+
+class SimplePdfBuilder {
+  private pages: PdfPage[] = [];
+  private images: PdfImageResource[] = [];
+  private currentPage: PdfPage;
+  private y = PDF_MARGIN;
+  private imageCounter = 0;
+
+  constructor() {
+    this.currentPage = this.createPage();
+  }
+
+  private createPage() {
+    const page: PdfPage = {
+      operations: [],
+      imageNames: [],
+    };
+    this.pages.push(page);
+    this.y = PDF_MARGIN;
+    return page;
+  }
+
+  private ensureSpace(height: number) {
+    if (this.y + height > PDF_PAGE_HEIGHT - PDF_MARGIN) {
+      this.currentPage = this.createPage();
+    }
+  }
+
+  addText(text: string, options: { fontSize?: number; lineHeight?: number } = {}) {
+    const fontSize = options.fontSize ?? PDF_FONT_SIZE;
+    const lineHeight = options.lineHeight ?? PDF_LINE_HEIGHT;
+    const lines = wrapPdfText(text, PDF_IMAGE_WIDTH, fontSize);
+
+    this.ensureSpace(lines.length * lineHeight + 4);
+
+    for (const line of lines) {
+      const baselineY = PDF_PAGE_HEIGHT - this.y;
+      this.currentPage.operations.push(
+        [
+          "BT",
+          "/F1",
+          pdfNumber(fontSize),
+          "Tf",
+          "0 0 0 rg",
+          "1 0 0 1",
+          pdfNumber(PDF_MARGIN),
+          pdfNumber(baselineY),
+          "Tm",
+          encodePdfUtf16BeHex(line),
+          "Tj",
+          "ET",
+        ].join(" ")
+      );
+      this.y += lineHeight;
+    }
+
+    this.y += 4;
+  }
+
+  addSpacer(height: number) {
+    this.ensureSpace(height);
+    this.y += height;
+  }
+
+  async addImage(filePath: string) {
+    const data = await readFile(filePath);
+    const dimensions = getJpegDimensions(data);
+    const scale = Math.min(
+      PDF_IMAGE_WIDTH / dimensions.width,
+      PDF_IMAGE_HEIGHT / dimensions.height
+    );
+    const drawWidth = dimensions.width * scale;
+    const drawHeight = dimensions.height * scale;
+
+    this.ensureSpace(drawHeight + 12);
+
+    this.imageCounter += 1;
+    const name = `Im${this.imageCounter}`;
+    const image: PdfImageResource = {
+      name,
+      data,
+      width: dimensions.width,
+      height: dimensions.height,
+    };
+    const x = PDF_MARGIN + (PDF_IMAGE_WIDTH - drawWidth) / 2;
+    const y = PDF_PAGE_HEIGHT - this.y - drawHeight;
+
+    this.images.push(image);
+    this.currentPage.imageNames.push(name);
+    this.currentPage.operations.push(
+      [
+        "q",
+        pdfNumber(drawWidth),
+        "0 0",
+        pdfNumber(drawHeight),
+        pdfNumber(x),
+        pdfNumber(y),
+        "cm",
+        `/${name}`,
+        "Do",
+        "Q",
+      ].join(" ")
+    );
+    this.y += drawHeight + 12;
+  }
+
+  buildBuffer() {
+    return buildPdfBuffer({
+      pages: this.pages,
+      images: this.images,
+    });
+  }
+}
+
+function buildPdfBuffer(options: {
+  pages: PdfPage[];
+  images: PdfImageResource[];
+}) {
+  const catalogObjectId = 1;
+  const pagesObjectId = 2;
+  const fontObjectId = 3;
+  const fontDescendantObjectId = 4;
+  let nextObjectId = 5;
+  const imageObjectIds = new Map<string, number>();
+
+  for (const image of options.images) {
+    imageObjectIds.set(image.name, nextObjectId);
+    nextObjectId += 1;
+  }
+
+  const contentObjectIds = options.pages.map(() => {
+    const id = nextObjectId;
+    nextObjectId += 1;
+    return id;
+  });
+  const pageObjectIds = options.pages.map(() => {
+    const id = nextObjectId;
+    nextObjectId += 1;
+    return id;
+  });
+  const objects = new Map<number, Buffer>();
+
+  function setTextObject(id: number, content: string) {
+    objects.set(id, Buffer.from(content, "utf8"));
+  }
+
+  function setStreamObject(id: number, dictionary: string, data: Buffer) {
+    objects.set(
+      id,
+      Buffer.concat([
+        Buffer.from(`<< ${dictionary} /Length ${data.length} >>\nstream\n`),
+        data,
+        Buffer.from("\nendstream"),
+      ])
+    );
+  }
+
+  setTextObject(
+    fontDescendantObjectId,
+    [
+      "<<",
+      "/Type /Font",
+      "/Subtype /CIDFontType0",
+      "/BaseFont /STSong-Light",
+      "/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >>",
+      "/DW 1000",
+      ">>",
+    ].join(" ")
+  );
+  setTextObject(
+    fontObjectId,
+    [
+      "<<",
+      "/Type /Font",
+      "/Subtype /Type0",
+      "/BaseFont /STSong-Light",
+      "/Encoding /UniGB-UCS2-H",
+      `/DescendantFonts [${fontDescendantObjectId} 0 R]`,
+      ">>",
+    ].join(" ")
+  );
+
+  for (const image of options.images) {
+    const imageObjectId = imageObjectIds.get(image.name);
+
+    if (!imageObjectId) {
+      continue;
+    }
+
+    setStreamObject(
+      imageObjectId,
+      [
+        "/Type /XObject",
+        "/Subtype /Image",
+        `/Width ${image.width}`,
+        `/Height ${image.height}`,
+        "/ColorSpace /DeviceRGB",
+        "/BitsPerComponent 8",
+        "/Filter /DCTDecode",
+      ].join(" "),
+      image.data
+    );
+  }
+
+  for (const [index, page] of options.pages.entries()) {
+    const content = Buffer.from(page.operations.join("\n"), "utf8");
+    const contentObjectId = contentObjectIds[index];
+    const pageObjectId = pageObjectIds[index];
+    const xObjects = page.imageNames
+      .map((name) => {
+        const imageObjectId = imageObjectIds.get(name);
+
+        return imageObjectId ? `/${name} ${imageObjectId} 0 R` : null;
+      })
+      .filter((entry): entry is string => Boolean(entry))
+      .join(" ");
+    const resourceParts = [
+      `/Font << /F1 ${fontObjectId} 0 R >>`,
+      xObjects ? `/XObject << ${xObjects} >>` : null,
+    ].filter((part): part is string => Boolean(part));
+
+    setStreamObject(contentObjectId, "", content);
+    setTextObject(
+      pageObjectId,
+      [
+        "<<",
+        "/Type /Page",
+        `/Parent ${pagesObjectId} 0 R`,
+        `/MediaBox [0 0 ${PDF_PAGE_WIDTH} ${PDF_PAGE_HEIGHT}]`,
+        `/Resources << ${resourceParts.join(" ")} >>`,
+        `/Contents ${contentObjectId} 0 R`,
+        ">>",
+      ].join(" ")
+    );
+  }
+
+  setTextObject(
+    pagesObjectId,
+    [
+      "<<",
+      "/Type /Pages",
+      `/Kids [${pageObjectIds.map((id) => `${id} 0 R`).join(" ")}]`,
+      `/Count ${pageObjectIds.length}`,
+      ">>",
+    ].join(" ")
+  );
+  setTextObject(
+    catalogObjectId,
+    `<< /Type /Catalog /Pages ${pagesObjectId} 0 R >>`
+  );
+
+  const header = Buffer.from("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n", "binary");
+  const chunks: Buffer[] = [header];
+  const offsets = [0];
+  let offset = header.length;
+
+  for (let objectId = 1; objectId < nextObjectId; objectId += 1) {
+    const objectBody = objects.get(objectId);
+
+    if (!objectBody) {
+      throw new Error(`PDF object ${objectId} was not written`);
+    }
+
+    const objectBuffer = Buffer.concat([
+      Buffer.from(`${objectId} 0 obj\n`),
+      objectBody,
+      Buffer.from("\nendobj\n"),
+    ]);
+
+    offsets[objectId] = offset;
+    chunks.push(objectBuffer);
+    offset += objectBuffer.length;
+  }
+
+  const xrefOffset = offset;
+  const xrefLines = [
+    "xref",
+    `0 ${nextObjectId}`,
+    "0000000000 65535 f ",
+    ...offsets
+      .slice(1)
+      .map((item) => `${String(item).padStart(10, "0")} 00000 n `),
+    "trailer",
+    `<< /Size ${nextObjectId} /Root ${catalogObjectId} 0 R >>`,
+    "startxref",
+    String(xrefOffset),
+    "%%EOF",
+    "",
+  ];
+
+  chunks.push(Buffer.from(xrefLines.join("\n"), "utf8"));
+
+  return Buffer.concat(chunks);
+}
+
+function formatInstructionTimestamp(seconds: number) {
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+async function renderInstructionDocumentPdf(options: {
+  document: InstructionDocumentArtifact;
+  frameAssets: InstructionFrameAsset[];
+  outputPath: string;
+}) {
+  const builder = new SimplePdfBuilder();
+  const frameAssetByStepIndex = new Map(
+    options.frameAssets.map((asset) => [asset.stepIndex, asset])
+  );
+
+  builder.addText(options.document.title, {
+    fontSize: PDF_TITLE_FONT_SIZE,
+    lineHeight: 28,
+  });
+  builder.addText(options.document.overview);
+  builder.addSpacer(8);
+
+  for (const step of options.document.steps) {
+    const frameAsset = frameAssetByStepIndex.get(step.stepIndex);
+
+    builder.addText(`${step.stepIndex}. ${step.title}`, {
+      fontSize: PDF_HEADING_FONT_SIZE,
+      lineHeight: 20,
+    });
+
+    if (frameAsset) {
+      await builder.addImage(frameAsset.filePath);
+    }
+
+    builder.addText(step.instruction);
+    builder.addText(
+      `Timestamp: ${formatInstructionTimestamp(step.timestampSeconds)}`
+    );
+    builder.addSpacer(10);
+  }
+
+  if (options.document.warnings.length > 0) {
+    builder.addText("Warnings", {
+      fontSize: PDF_HEADING_FONT_SIZE,
+      lineHeight: 20,
+    });
+
+    for (const warning of options.document.warnings) {
+      builder.addText(`- ${warning}`);
+    }
+  }
+
+  await writeFile(options.outputPath, builder.buildBuffer());
+  await assertNonEmptyFile(options.outputPath, {
+    code: "instruction_pdf_empty",
+    message: "Instruction document PDF was empty",
+  });
+}
+
 function toWorkerError(error: unknown) {
   if (error instanceof WorkerError) {
     return error;
@@ -2862,6 +3652,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   let transcriptId: string | null = null;
   let openAiVisualResponseId: string | null = null;
   let openAiEditPlanResponseId: string | null = null;
+  let openAiInstructionDocumentResponseId: string | null = null;
   let openAiScriptResponseId: string | null = null;
   let elevenLabsTtsRequestId: string | null = null;
   const workDir = await mkdtemp(
@@ -2870,6 +3661,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   const inputPath = path.join(workDir, "input.mp4");
   const audioPath = path.join(workDir, "audio.wav");
   const framesDir = path.join(workDir, "frames");
+  const instructionFramesDir = path.join(workDir, "instruction-frames");
+  const instructionPdfPath = path.join(workDir, "instruction-document.pdf");
   const voiceoverPath = path.join(workDir, "voiceover.mp3");
   const subtitlesPath = path.join(workDir, "subtitles.ass");
   const mutedClipEditPath = path.join(workDir, "muted-edit.mp4");
@@ -2878,6 +3671,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   const transcriptR2Key = `artifacts/${payload.videoId}/transcript.json`;
   const visualTimelineR2Key = `artifacts/${payload.videoId}/visual-timeline.json`;
   const editPlanR2Key = `artifacts/${payload.videoId}/edit-plan.json`;
+  const instructionDocR2Key = `artifacts/${payload.videoId}/instruction-document/document.json`;
+  const instructionPdfR2Key = `artifacts/${payload.videoId}/instruction-document/instructions.pdf`;
   const voiceoverScriptR2Key = `artifacts/${payload.videoId}/voiceover-script.json`;
   const voiceoverR2Key = `artifacts/${payload.videoId}/voiceover.mp3`;
   const subtitleR2Key = `artifacts/${payload.videoId}/subtitles.ass`;
@@ -2915,6 +3710,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       transcript_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
+      instruction_doc_r2_key: null,
+      instruction_pdf_r2_key: null,
       voiceover_script_r2_key: null,
       subtitle_r2_key: null,
       final_r2_key: null,
@@ -3085,6 +3882,88 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       retryable: null,
     });
 
+    stage = "writing_instruction_document";
+    await updateStage(payload.videoId, stage);
+    const instructionDocumentResult = await generateInstructionDocument({
+      videoId: payload.videoId,
+      sourceR2Key: originalR2Key,
+      transcriptR2Key,
+      visualTimelineR2Key,
+      editPlanR2Key,
+      prompt,
+      targetLanguage,
+      transcript,
+      visualTimeline,
+      editPlan,
+      sampledFrames: sampledFrameResult.frames,
+      durationSeconds: sampledFrameResult.durationSeconds,
+    });
+    openAiInstructionDocumentResponseId =
+      instructionDocumentResult.providerRequestId;
+    const instructionFrameAssets = await extractInstructionDocumentFrames({
+      videoId: payload.videoId,
+      inputPath,
+      outputDir: instructionFramesDir,
+      document: instructionDocumentResult.document,
+    });
+    const instructionDocumentArtifact = buildInstructionDocumentArtifact({
+      videoId: payload.videoId,
+      sourceR2Key: originalR2Key,
+      transcriptR2Key,
+      visualTimelineR2Key,
+      editPlanR2Key,
+      document: instructionDocumentResult.document,
+      frameAssets: instructionFrameAssets,
+      providerRequestId: openAiInstructionDocumentResponseId,
+      model: instructionDocumentResult.model,
+      rawResponse: instructionDocumentResult.rawResponse,
+      sourceDurationSeconds: sampledFrameResult.durationSeconds,
+    });
+    await renderInstructionDocumentPdf({
+      document: instructionDocumentArtifact,
+      frameAssets: instructionFrameAssets,
+      outputPath: instructionPdfPath,
+    });
+
+    for (const frameAsset of instructionFrameAssets) {
+      await uploadFileToR2(frameAsset.r2Key, frameAsset.filePath, "image/jpeg");
+    }
+
+    await uploadJsonToR2(instructionDocR2Key, instructionDocumentArtifact);
+    await uploadFileToR2(
+      instructionPdfR2Key,
+      instructionPdfPath,
+      "application/pdf"
+    );
+
+    stage = "instruction_document_ready";
+    await updateVideo(payload.videoId, {
+      status: "processing",
+      current_stage: stage,
+      progress: STAGE_PROGRESS[stage],
+      transcript_r2_key: transcriptR2Key,
+      visual_timeline_r2_key: visualTimelineR2Key,
+      edit_plan_r2_key: editPlanR2Key,
+      instruction_doc_r2_key: instructionDocR2Key,
+      instruction_pdf_r2_key: instructionPdfR2Key,
+      provider_request_id:
+        openAiInstructionDocumentResponseId ??
+        openAiEditPlanResponseId ??
+        openAiVisualResponseId ??
+        transcriptId,
+      provider_run_ids: {
+        assemblyai_transcript_id: transcriptId,
+        openai_visual_response_id: openAiVisualResponseId,
+        openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_instruction_document_response_id:
+          openAiInstructionDocumentResponseId,
+      },
+      error_message: null,
+      error_code: null,
+      error_provider: null,
+      retryable: null,
+    });
+
     const brandLanguageContext = await resolveBrandLanguageContext(
       payload.videoId,
       targetLanguage
@@ -3120,9 +3999,12 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       transcript_r2_key: transcriptR2Key,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
+      instruction_doc_r2_key: instructionDocR2Key,
+      instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       provider_request_id:
         openAiScriptResponseId ??
+        openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
         transcriptId,
@@ -3130,6 +4012,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         assemblyai_transcript_id: transcriptId,
         openai_visual_response_id: openAiVisualResponseId,
         openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_instruction_document_response_id:
+          openAiInstructionDocumentResponseId,
         openai_script_response_id: openAiScriptResponseId,
       },
       error_message: null,
@@ -3169,11 +4053,14 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       transcript_r2_key: transcriptR2Key,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
+      instruction_doc_r2_key: instructionDocR2Key,
+      instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       subtitle_r2_key: subtitleR2Key,
       provider_request_id:
         elevenLabsTtsRequestId ??
         openAiScriptResponseId ??
+        openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
         transcriptId,
@@ -3181,6 +4068,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         assemblyai_transcript_id: transcriptId,
         openai_visual_response_id: openAiVisualResponseId,
         openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_instruction_document_response_id:
+          openAiInstructionDocumentResponseId,
         openai_script_response_id: openAiScriptResponseId,
         elevenlabs_tts_request_id: elevenLabsTtsRequestId,
       },
@@ -3221,12 +4110,15 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       transcript_r2_key: transcriptR2Key,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
+      instruction_doc_r2_key: instructionDocR2Key,
+      instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       subtitle_r2_key: subtitleR2Key,
       final_r2_key: finalR2Key,
       provider_request_id:
         elevenLabsTtsRequestId ??
         openAiScriptResponseId ??
+        openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
         transcriptId,
@@ -3234,6 +4126,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         assemblyai_transcript_id: transcriptId,
         openai_visual_response_id: openAiVisualResponseId,
         openai_edit_plan_response_id: openAiEditPlanResponseId,
+        openai_instruction_document_response_id:
+          openAiInstructionDocumentResponseId,
         openai_script_response_id: openAiScriptResponseId,
         elevenlabs_tts_request_id: elevenLabsTtsRequestId,
       },
@@ -3254,6 +4148,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         workerError.providerRequestId ??
         elevenLabsTtsRequestId ??
         openAiScriptResponseId ??
+        openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
         transcriptId,
