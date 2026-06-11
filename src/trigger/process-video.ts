@@ -146,6 +146,7 @@ const ELEVENLABS_DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
 const DEFAULT_FRAME_SAMPLE_INTERVAL_SECONDS = 3;
 const DEFAULT_MAX_VISUAL_FRAMES = 30;
 const OPENAI_VISUAL_ANALYSIS_MAX_OUTPUT_TOKENS = 12000;
+const OPENAI_EDIT_PLAN_MAX_OUTPUT_TOKENS = 12000;
 const MAX_TRANSCRIPT_CONTEXT_CHARS = 6000;
 const MAX_EDIT_PLAN_UTTERANCES = 80;
 const MAX_EDIT_PLAN_WORDS = 300;
@@ -1239,7 +1240,7 @@ function extractOpenAiOutputText(body: OpenAiResponsesResponse) {
     }
   }
 
-  return textParts.length > 0 ? textParts.join("\n") : null;
+  return textParts.length > 0 ? textParts.join("") : null;
 }
 
 function parseJsonObject(text: string) {
@@ -1510,6 +1511,8 @@ function buildEditPlanInstructions(options: {
     "8. segments must contain at least one selected segment. Zero segments is invalid in all cases.",
     "9. If tutorial evidence is weak, create one fallback tutorial step named Best Available Tutorial Context, select the best available chronological source range, and add a warning. Do not return an empty segment list.",
     "10. Use transcript timing as semantic evidence and visual timeline frames/candidate moments as visual evidence.",
+    "11. Keep titles, objectives, reasons, evidence, omittedContent reasons, and warnings concise.",
+    "12. Prefer no more than 8 tutorialSteps, 8 selected segments, and 8 omittedContent entries.",
     "",
     "Segment timing rules:",
     "- sourceStart and sourceEnd are in source video seconds.",
@@ -1742,7 +1745,7 @@ async function planTutorialSegments(options: {
           schema: EDIT_PLAN_SCHEMA,
         },
       },
-      max_output_tokens: 5000,
+      max_output_tokens: OPENAI_EDIT_PLAN_MAX_OUTPUT_TOKENS,
       store: false,
     }),
   });
@@ -1765,9 +1768,27 @@ async function planTutorialSegments(options: {
     );
   }
 
-  const outputText = body ? extractOpenAiOutputText(body) : null;
   const providerRequestId =
     typeof body?.id === "string" ? body.id : requestId ?? null;
+
+  if (body.status === "incomplete") {
+    const details =
+      body.incomplete_details && typeof body.incomplete_details === "object"
+        ? `: ${JSON.stringify(body.incomplete_details)}`
+        : "";
+
+    throw new WorkerError(
+      `OpenAI edit planning response was incomplete before valid JSON was returned${details}`,
+      {
+        code: "openai_edit_plan_incomplete",
+        provider: OPENAI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      }
+    );
+  }
+
+  const outputText = body ? extractOpenAiOutputText(body) : null;
 
   if (!outputText) {
     throw new WorkerError("OpenAI edit planning response had no output text", {
@@ -2863,7 +2884,7 @@ async function assertNonEmptyFile(filePath: string, options: {
 
 async function countMediaStreams(
   filePath: string,
-  streamType: "a" | "v"
+  streamType: "a" | "v" | "s"
 ) {
   const { stdout } = await runCommand("ffprobe", [
     "-v",
@@ -2879,6 +2900,21 @@ async function countMediaStreams(
   const trimmedOutput = stdout.trim();
 
   return trimmedOutput ? trimmedOutput.split(/\r?\n/).length : 0;
+}
+
+async function hasFfmpegFilter(filterName: string) {
+  try {
+    const { stdout, stderr } = await runCommand("ffmpeg", [
+      "-hide_banner",
+      "-h",
+      `filter=${filterName}`,
+    ]);
+    const output = `${stdout}\n${stderr}`;
+
+    return !output.includes(`Unknown filter '${filterName}'`);
+  } catch {
+    return false;
+  }
 }
 
 async function renderMutedClipEdit(options: {
@@ -2990,15 +3026,25 @@ async function renderFinalVideo(options: {
     0,
     voiceoverDurationSeconds - mutedDurationSeconds
   );
+  const supportsBurnedSubtitles = await hasFfmpegFilter("subtitles");
   const videoFilters = [
     padDurationSeconds > 0
       ? `tpad=stop_mode=clone:stop_duration=${formatFfmpegSeconds(
           padDurationSeconds
         )}`
       : null,
-    `subtitles=${path.basename(options.subtitlesPath)}`,
+    supportsBurnedSubtitles
+      ? `subtitles=filename=${path.basename(options.subtitlesPath)}`
+      : null,
     "format=yuv420p",
   ].filter((filter): filter is string => Boolean(filter));
+  const subtitleInputArgs = supportsBurnedSubtitles
+    ? []
+    : ["-i", path.basename(options.subtitlesPath)];
+  const subtitleMapArgs = supportsBurnedSubtitles ? [] : ["-map", "2:0"];
+  const subtitleCodecArgs = supportsBurnedSubtitles
+    ? []
+    : ["-c:s", "mov_text", "-disposition:s:0", "default"];
 
   await runFfmpeg(
     [
@@ -3010,12 +3056,14 @@ async function renderFinalVideo(options: {
       path.basename(options.mutedClipEditPath),
       "-i",
       path.basename(options.voiceoverPath),
+      ...subtitleInputArgs,
       "-filter_complex",
       `[0:v]${videoFilters.join(",")}[vout]`,
       "-map",
       "[vout]",
       "-map",
       "1:a:0",
+      ...subtitleMapArgs,
       "-c:v",
       "libx264",
       "-preset",
@@ -3026,6 +3074,7 @@ async function renderFinalVideo(options: {
       "aac",
       "-b:a",
       "192k",
+      ...subtitleCodecArgs,
       "-movflags",
       "+faststart",
       path.basename(options.outputPath),
@@ -3046,6 +3095,18 @@ async function renderFinalVideo(options: {
       provider: "ffmpeg",
       retryable: true,
     });
+  }
+
+  if (!supportsBurnedSubtitles) {
+    const subtitleStreamCount = await countMediaStreams(options.outputPath, "s");
+
+    if (subtitleStreamCount === 0) {
+      throw new WorkerError("Final video is missing subtitle stream", {
+        code: "final_render_subtitle_stream_missing",
+        provider: "ffmpeg",
+        retryable: true,
+      });
+    }
   }
 
   const finalDurationSeconds = await getMediaDurationSeconds(
