@@ -18,6 +18,13 @@ import {
 import { DEFAULT_TARGET_LANGUAGE } from "../lib/languages";
 import { r2, R2_BUCKET_NAME } from "../lib/r2";
 import { supabaseAdmin } from "../lib/supabase-admin";
+import {
+  buildAssSubtitleFile,
+  buildClipScalePadFilters,
+  readRenderDimensionsFromFfprobe,
+  type RenderDimensions,
+  type SubtitleCue,
+} from "../lib/video-rendering";
 
 type ProcessVideoPayload = {
   videoId: string;
@@ -154,8 +161,6 @@ const MIN_EDIT_SEGMENT_DURATION_SECONDS = 0.25;
 const MAX_SUBTITLE_CHARS = 44;
 const MAX_SUBTITLE_DURATION_SECONDS = 4.5;
 const MIN_SUBTITLE_DURATION_SECONDS = 0.35;
-const FINAL_RENDER_WIDTH = 1080;
-const FINAL_RENDER_HEIGHT = 1920;
 const FINAL_RENDER_CRF = "23";
 const FINAL_RENDER_PRESET = "veryfast";
 const MAX_INSTRUCTION_DOCUMENT_STEPS = 12;
@@ -1005,6 +1010,49 @@ async function getVideoDurationSeconds(filePath: string) {
     "ffprobe_duration_invalid",
     "Unable to read video duration with ffprobe"
   );
+}
+
+async function getSourceRenderDimensions(
+  filePath: string
+): Promise<RenderDimensions> {
+  const { stdout } = await runCommand("ffprobe", [
+    "-v",
+    "error",
+    "-select_streams",
+    "v:0",
+    "-show_entries",
+    "stream=width,height,sample_aspect_ratio,display_aspect_ratio:stream_tags=rotate:stream_side_data=rotation",
+    "-of",
+    "json",
+    filePath,
+  ]);
+
+  let parsedOutput: unknown;
+
+  try {
+    parsedOutput = JSON.parse(stdout) as unknown;
+  } catch {
+    throw new WorkerError("Unable to parse video dimensions with ffprobe", {
+      code: "ffprobe_dimensions_invalid",
+      provider: "ffmpeg",
+      retryable: false,
+    });
+  }
+
+  try {
+    return readRenderDimensionsFromFfprobe(parsedOutput);
+  } catch (error) {
+    throw new WorkerError(
+      error instanceof Error
+        ? error.message
+        : "Unable to read video dimensions with ffprobe",
+      {
+        code: "ffprobe_dimensions_invalid",
+        provider: "ffmpeg",
+        retryable: false,
+      }
+    );
+  }
 }
 
 function buildFrameTimestamps(
@@ -2050,12 +2098,6 @@ type SubtitleWord = {
   endSeconds: number;
 };
 
-type SubtitleCue = {
-  startSeconds: number;
-  endSeconds: number;
-  text: string;
-};
-
 type RenderSegment = {
   index: number;
   sourceStart: number;
@@ -2764,54 +2806,6 @@ function normalizeSubtitleCueTimings(cues: SubtitleCue[]) {
   });
 }
 
-function formatAssTimestamp(seconds: number) {
-  const totalCentiseconds = Math.max(0, Math.round(seconds * 100));
-  const hours = Math.floor(totalCentiseconds / 360000);
-  const minutes = Math.floor((totalCentiseconds % 360000) / 6000);
-  const wholeSeconds = Math.floor((totalCentiseconds % 6000) / 100);
-  const centiseconds = totalCentiseconds % 100;
-
-  return `${hours}:${String(minutes).padStart(2, "0")}:${String(
-    wholeSeconds
-  ).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
-}
-
-function escapeAssText(text: string) {
-  return text
-    .replace(/\\/g, "\\\\")
-    .replace(/{/g, "\\{")
-    .replace(/}/g, "\\}")
-    .replace(/\r?\n/g, "\\N")
-    .trim();
-}
-
-function buildAssSubtitleFile(cues: SubtitleCue[]) {
-  const dialogueLines = cues.map(
-    (cue) =>
-      `Dialogue: 0,${formatAssTimestamp(cue.startSeconds)},${formatAssTimestamp(
-        cue.endSeconds
-      )},Default,,0,0,0,,${escapeAssText(cue.text)}`
-  );
-
-  return [
-    "[Script Info]",
-    "ScriptType: v4.00+",
-    "WrapStyle: 2",
-    "ScaledBorderAndShadow: yes",
-    "PlayResX: 1080",
-    "PlayResY: 1920",
-    "",
-    "[V4+ Styles]",
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    "Style: Default,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00111111,&H99000000,-1,0,0,0,100,100,0,0,1,4,1,2,80,80,120,1",
-    "",
-    "[Events]",
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ...dialogueLines,
-    "",
-  ].join("\n");
-}
-
 function formatFfmpegSeconds(value: number) {
   return value.toFixed(3);
 }
@@ -2922,6 +2916,7 @@ async function renderMutedClipEdit(options: {
   outputPath: string;
   editPlan: EditPlanArtifact;
   workDir: string;
+  renderDimensions: RenderDimensions;
 }) {
   const segments = getRenderSegments(options.editPlan);
   const segmentFilters = segments.map((segment, index) => {
@@ -2932,9 +2927,7 @@ async function renderMutedClipEdit(options: {
         segment.sourceStart
       )}:end=${formatFfmpegSeconds(segment.sourceEnd)}`,
       "setpts=PTS-STARTPTS",
-      `scale=${FINAL_RENDER_WIDTH}:${FINAL_RENDER_HEIGHT}:force_original_aspect_ratio=decrease`,
-      `pad=${FINAL_RENDER_WIDTH}:${FINAL_RENDER_HEIGHT}:(ow-iw)/2:(oh-ih)/2`,
-      "setsar=1",
+      ...buildClipScalePadFilters(options.renderDimensions),
       "format=yuv420p",
     ];
 
@@ -3796,6 +3789,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     stage = "downloading_source";
     await updateStage(payload.videoId, stage);
     await downloadFromR2(originalR2Key, inputPath);
+    const renderDimensions = await getSourceRenderDimensions(inputPath);
 
     stage = "extracting_audio";
     await updateStage(payload.videoId, stage);
@@ -4117,7 +4111,11 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       voiceoverScript.script,
       voiceover.alignment
     );
-    await writeFile(subtitlesPath, buildAssSubtitleFile(subtitleCues), "utf8");
+    await writeFile(
+      subtitlesPath,
+      buildAssSubtitleFile(subtitleCues, renderDimensions),
+      "utf8"
+    );
     await uploadFileToR2(subtitleR2Key, subtitlesPath, "text/plain");
 
     stage = "voiceover_subtitles_ready";
@@ -4161,6 +4159,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       outputPath: mutedClipEditPath,
       editPlan,
       workDir,
+      renderDimensions,
     });
 
     stage = "rendering_final";
