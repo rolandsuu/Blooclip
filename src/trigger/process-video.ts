@@ -21,8 +21,17 @@ import {
   type InstructionDocumentArtifact,
   type InstructionDocumentArtifactStep,
 } from "../lib/instruction-document";
+import {
+  ElevenLabsVoiceConfigError,
+  getElevenLabsLanguageCode,
+  selectElevenLabsVoice,
+} from "../lib/elevenlabs-voice-config";
 import { DEFAULT_TARGET_LANGUAGE } from "../lib/languages";
 import { r2, R2_BUCKET_NAME } from "../lib/r2";
+import {
+  buildSubtitleCues,
+  SubtitleCueGenerationError,
+} from "../lib/subtitle-cues";
 import { supabaseAdmin } from "../lib/supabase-admin";
 import {
   VIDEO_EVENT_ANALYSIS_SCHEMA,
@@ -180,9 +189,6 @@ const MAX_TRANSCRIPT_CONTEXT_CHARS = 6000;
 const MAX_EDIT_PLAN_UTTERANCES = 80;
 const MAX_EDIT_PLAN_WORDS = 300;
 const MIN_EDIT_SEGMENT_DURATION_SECONDS = 0.25;
-const MAX_SUBTITLE_CHARS = 44;
-const MAX_SUBTITLE_DURATION_SECONDS = 4.5;
-const MIN_SUBTITLE_DURATION_SECONDS = 0.35;
 const FINAL_RENDER_CRF = "23";
 const FINAL_RENDER_PRESET = "veryfast";
 const MAX_INSTRUCTION_DOCUMENT_STEPS = 12;
@@ -196,6 +202,7 @@ const PDF_TITLE_FONT_SIZE = 22;
 const PDF_HEADING_FONT_SIZE = 15;
 const PDF_IMAGE_WIDTH = PDF_PAGE_WIDTH - PDF_MARGIN * 2;
 const PDF_IMAGE_HEIGHT = 220;
+const SUBTITLE_FONTS_DIR = path.join(process.cwd(), "assets", "fonts");
 const VISUAL_TIMELINE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -839,9 +846,8 @@ function getGeminiVideoContentType(contentType: string | null) {
   );
 }
 
-function getElevenLabsConfig() {
+function getElevenLabsConfig(targetLanguage: string) {
   const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
 
   if (!apiKey) {
     throw new WorkerError(
@@ -854,20 +860,27 @@ function getElevenLabsConfig() {
     );
   }
 
-  if (!voiceId) {
-    throw new WorkerError(
-      "Missing ElevenLabs voice ID. Set ELEVENLABS_VOICE_ID.",
-      {
-        code: "elevenlabs_voice_id_missing",
+  let voiceSelection;
+
+  try {
+    voiceSelection = selectElevenLabsVoice(targetLanguage, process.env);
+  } catch (error) {
+    if (error instanceof ElevenLabsVoiceConfigError) {
+      throw new WorkerError(error.message, {
+        code: error.code,
         provider: ELEVENLABS_PROVIDER,
         retryable: false,
-      }
-    );
+      });
+    }
+
+    throw error;
   }
 
   return {
     apiKey,
-    voiceId,
+    voiceId: voiceSelection.voiceId,
+    voiceEnvVarName: voiceSelection.envVarName,
+    languageCode: voiceSelection.languageCode,
     baseUrl: normalizeBaseUrl(
       process.env.ELEVENLABS_BASE_URL ?? ELEVENLABS_DEFAULT_BASE_URL
     ),
@@ -2524,12 +2537,6 @@ type ElevenLabsAlignment = {
   characterEndTimesSeconds: number[];
 };
 
-type SubtitleWord = {
-  text: string;
-  startSeconds: number;
-  endSeconds: number;
-};
-
 type RenderSegment = {
   index: number;
   sourceStart: number;
@@ -2892,12 +2899,6 @@ async function generateVoiceoverScript(options: {
   };
 }
 
-function getIsoLanguageCode(targetLanguage: string) {
-  const trimmed = targetLanguage.trim();
-
-  return /^[a-z]{2}$/i.test(trimmed) ? trimmed.toLowerCase() : null;
-}
-
 function parseElevenLabsAlignment(value: unknown): ElevenLabsAlignment | null {
   if (!isRecord(value)) {
     return null;
@@ -3004,8 +3005,15 @@ async function generateElevenLabsVoiceover(options: {
   brandLanguageContext: BrandLanguageContext;
   outputPath: string;
 }) {
-  const { apiKey, voiceId, baseUrl, modelId, outputFormat } =
-    getElevenLabsConfig();
+  const {
+    apiKey,
+    voiceId,
+    voiceEnvVarName,
+    languageCode,
+    baseUrl,
+    modelId,
+    outputFormat,
+  } = getElevenLabsConfig(options.targetLanguage);
   const url = new URL(
     `${baseUrl}/text-to-speech/${encodeURIComponent(
       voiceId
@@ -3013,7 +3021,6 @@ async function generateElevenLabsVoiceover(options: {
   );
   url.searchParams.set("output_format", outputFormat);
 
-  const languageCode = getIsoLanguageCode(options.targetLanguage);
   const requestBody: Record<string, unknown> = {
     text: options.script,
     model_id: modelId,
@@ -3091,151 +3098,10 @@ async function generateElevenLabsVoiceover(options: {
     modelId,
     outputFormat,
     languageCode,
+    voiceEnvVarName,
     usedNormalizedAlignment,
     alignment,
   };
-}
-
-function buildSubtitleWords(
-  script: string,
-  alignment: ElevenLabsAlignment
-): SubtitleWord[] {
-  const scriptCharacters = Array.from(script);
-  const words: SubtitleWord[] = [];
-  let currentText = "";
-  let currentStart: number | null = null;
-  let currentEnd: number | null = null;
-
-  function flushCurrentWord() {
-    if (!currentText || currentStart === null || currentEnd === null) {
-      return;
-    }
-
-    words.push({
-      text: currentText,
-      startSeconds: currentStart,
-      endSeconds: currentEnd,
-    });
-    currentText = "";
-    currentStart = null;
-    currentEnd = null;
-  }
-
-  for (let index = 0; index < scriptCharacters.length; index += 1) {
-    const character = scriptCharacters[index];
-    const start = alignment.characterStartTimesSeconds[index];
-    const end = alignment.characterEndTimesSeconds[index];
-
-    if (/\s/.test(character)) {
-      flushCurrentWord();
-      continue;
-    }
-
-    if (currentStart === null) {
-      currentStart = start;
-    }
-
-    currentText += character;
-    currentEnd = end;
-  }
-
-  flushCurrentWord();
-
-  if (words.length === 0) {
-    throw new WorkerError("Unable to build subtitle words from voiceover script", {
-      code: "subtitle_generation_failed",
-      retryable: true,
-    });
-  }
-
-  return words;
-}
-
-function createSubtitleCue(words: SubtitleWord[]): SubtitleCue {
-  const startSeconds = words[0].startSeconds;
-  const rawEndSeconds = words[words.length - 1].endSeconds;
-  const endSeconds = Math.max(
-    rawEndSeconds,
-    startSeconds + MIN_SUBTITLE_DURATION_SECONDS
-  );
-
-  return {
-    startSeconds,
-    endSeconds,
-    text: words.map((word) => word.text).join(" "),
-  };
-}
-
-function buildSubtitleCues(
-  script: string,
-  alignment: ElevenLabsAlignment
-): SubtitleCue[] {
-  const words = buildSubtitleWords(script, alignment);
-  const cues: SubtitleCue[] = [];
-  let currentWords: SubtitleWord[] = [];
-
-  function flushCurrentCue() {
-    if (currentWords.length === 0) {
-      return;
-    }
-
-    cues.push(createSubtitleCue(currentWords));
-    currentWords = [];
-  }
-
-  for (const word of words) {
-    if (currentWords.length > 0) {
-      const candidateText = [...currentWords, word]
-        .map((candidateWord) => candidateWord.text)
-        .join(" ");
-      const candidateDuration =
-        word.endSeconds - currentWords[0].startSeconds;
-
-      if (
-        candidateText.length > MAX_SUBTITLE_CHARS ||
-        candidateDuration > MAX_SUBTITLE_DURATION_SECONDS
-      ) {
-        flushCurrentCue();
-      }
-    }
-
-    currentWords.push(word);
-
-    const currentText = currentWords.map((currentWord) => currentWord.text).join(" ");
-
-    if (/[.!?。！？]$/.test(word.text) && currentText.length >= 20) {
-      flushCurrentCue();
-    }
-  }
-
-  flushCurrentCue();
-
-  return normalizeSubtitleCueTimings(cues);
-}
-
-function normalizeSubtitleCueTimings(cues: SubtitleCue[]) {
-  let previousEnd = 0;
-
-  return cues.map((cue, index) => {
-    const nextStart = cues[index + 1]?.startSeconds;
-    const startSeconds = Math.max(cue.startSeconds, previousEnd);
-    let endSeconds = Math.max(
-      cue.endSeconds,
-      startSeconds + MIN_SUBTITLE_DURATION_SECONDS
-    );
-
-    if (typeof nextStart === "number" && endSeconds > nextStart) {
-      endSeconds = Math.max(startSeconds + 0.05, nextStart);
-    }
-
-    previousEnd = endSeconds;
-
-    return {
-      ...cue,
-      startSeconds,
-      endSeconds,
-    };
-  });
 }
 
 function formatFfmpegSeconds(value: number) {
@@ -3430,12 +3296,54 @@ async function renderMutedClipEdit(options: {
   };
 }
 
+function escapeFfmpegFilterOption(value: string) {
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/:/g, "\\:")
+    .replace(/'/g, "\\'")
+    .replace(/,/g, "\\,")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
+}
+
+function buildBurnedSubtitleFilter(options: {
+  subtitlesPath: string;
+  fontsDir?: string;
+}) {
+  const subtitleOptions = [
+    `filename=${escapeFfmpegFilterOption(path.basename(options.subtitlesPath))}`,
+    options.fontsDir
+      ? `fontsdir=${escapeFfmpegFilterOption(options.fontsDir)}`
+      : null,
+  ].filter((option): option is string => Boolean(option));
+
+  return `subtitles=${subtitleOptions.join(":")}`;
+}
+
+async function assertSubtitleFontsDir(fontsDir: string) {
+  try {
+    const fontDirStats = await stat(fontsDir);
+
+    if (!fontDirStats.isDirectory()) {
+      throw new Error("not a directory");
+    }
+  } catch {
+    throw new WorkerError("Subtitle font directory is missing", {
+      code: "subtitle_fonts_dir_missing",
+      provider: "ffmpeg",
+      retryable: false,
+    });
+  }
+}
+
 async function renderFinalVideo(options: {
   mutedClipEditPath: string;
   voiceoverPath: string;
   subtitlesPath: string;
   outputPath: string;
   workDir: string;
+  subtitleFontsDir?: string;
+  requireBurnedSubtitles?: boolean;
 }) {
   const mutedDurationSeconds = await getMediaDurationSeconds(
     options.mutedClipEditPath,
@@ -3452,6 +3360,22 @@ async function renderFinalVideo(options: {
     voiceoverDurationSeconds - mutedDurationSeconds
   );
   const supportsBurnedSubtitles = await hasFfmpegFilter("subtitles");
+
+  if (!supportsBurnedSubtitles && options.requireBurnedSubtitles) {
+    throw new WorkerError(
+      "FFmpeg subtitles filter is required for Chinese subtitles",
+      {
+        code: "ffmpeg_subtitles_filter_missing",
+        provider: "ffmpeg",
+        retryable: false,
+      }
+    );
+  }
+
+  if (supportsBurnedSubtitles && options.subtitleFontsDir) {
+    await assertSubtitleFontsDir(options.subtitleFontsDir);
+  }
+
   const videoFilters = [
     padDurationSeconds > 0
       ? `tpad=stop_mode=clone:stop_duration=${formatFfmpegSeconds(
@@ -3459,7 +3383,10 @@ async function renderFinalVideo(options: {
         )}`
       : null,
     supportsBurnedSubtitles
-      ? `subtitles=filename=${path.basename(options.subtitlesPath)}`
+      ? buildBurnedSubtitleFilter({
+          subtitlesPath: options.subtitlesPath,
+          fontsDir: options.subtitleFontsDir,
+        })
       : null,
     "format=yuv420p",
   ].filter((filter): filter is string => Boolean(filter));
@@ -4629,10 +4556,24 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
 
     stage = "building_subtitles";
     await updateStage(payload.videoId, stage);
-    const subtitleCues = buildSubtitleCues(
-      voiceoverScript.script,
-      voiceover.alignment
-    );
+    let subtitleCues: SubtitleCue[];
+
+    try {
+      subtitleCues = buildSubtitleCues(
+        voiceoverScript.script,
+        voiceover.alignment,
+        { targetLanguage }
+      );
+    } catch (error) {
+      if (error instanceof SubtitleCueGenerationError) {
+        throw new WorkerError(error.message, {
+          code: error.code,
+          retryable: true,
+        });
+      }
+
+      throw error;
+    }
     await writeFile(
       subtitlesPath,
       buildAssSubtitleFile(subtitleCues, renderDimensions),
@@ -4696,6 +4637,8 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       subtitlesPath,
       outputPath: finalPath,
       workDir,
+      subtitleFontsDir: SUBTITLE_FONTS_DIR,
+      requireBurnedSubtitles: getElevenLabsLanguageCode(targetLanguage) === "zh",
     });
 
     stage = "uploading_final";

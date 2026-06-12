@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildAssSubtitleFile,
   buildClipScalePadFilters,
+  DEFAULT_SUBTITLE_FONT_FAMILY,
   normalizeRenderDimensions,
   readRenderDimensionsFromFfprobe,
 } from "./video-rendering.ts";
@@ -62,11 +63,31 @@ test("buildAssSubtitleFile uses render dimensions and scales style", () => {
 
   assert.match(subtitles, /PlayResX: 1920/);
   assert.match(subtitles, /PlayResY: 1080/);
-  assert.match(subtitles, /Style: Default,Arial,33,/);
+  assert.match(
+    subtitles,
+    new RegExp(`Style: Default,${DEFAULT_SUBTITLE_FONT_FAMILY},33,`)
+  );
   assert.match(
     subtitles,
     /Dialogue: 0,0:00:00\.00,0:00:02\.50,Default,,0,0,0,,Prepare the cup stack/
   );
+});
+
+test("buildAssSubtitleFile allows a custom subtitle font family", () => {
+  const subtitles = buildAssSubtitleFile(
+    [
+      {
+        startSeconds: 0,
+        endSeconds: 1,
+        text: "安装型材架到平台。",
+      },
+    ],
+    { width: 1080, height: 1920 },
+    { fontFamily: "Custom CJK Font" }
+  );
+
+  assert.match(subtitles, /Style: Default,Custom CJK Font,58,/);
+  assert.match(subtitles, /安装型材架到平台。/);
 });
 
 test("normalizeRenderDimensions rounds odd dimensions up for yuv420p", () => {

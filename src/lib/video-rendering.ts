@@ -9,6 +9,10 @@ export type SubtitleCue = {
   text: string;
 };
 
+export type AssSubtitleOptions = {
+  fontFamily?: string;
+};
+
 const BASE_SUBTITLE_WIDTH = 1080;
 const BASE_SUBTITLE_HEIGHT = 1920;
 const BASE_SUBTITLE_FONT_SIZE = 58;
@@ -16,6 +20,7 @@ const BASE_SUBTITLE_MARGIN_X = 80;
 const BASE_SUBTITLE_MARGIN_V = 120;
 const BASE_SUBTITLE_OUTLINE = 4;
 const BASE_SUBTITLE_SHADOW = 1;
+export const DEFAULT_SUBTITLE_FONT_FAMILY = "Noto Sans CJK SC";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -184,6 +189,10 @@ function escapeAssText(text: string) {
     .trim();
 }
 
+function sanitizeAssStyleValue(value: string) {
+  return value.replace(/,/g, " ").trim();
+}
+
 function scaleSubtitleMetric(
   value: number,
   renderDimensions: RenderDimensions,
@@ -200,9 +209,13 @@ function scaleSubtitleMetric(
 
 export function buildAssSubtitleFile(
   cues: SubtitleCue[],
-  renderDimensions: RenderDimensions
+  renderDimensions: RenderDimensions,
+  options: AssSubtitleOptions = {}
 ) {
   const dimensions = normalizeRenderDimensions(renderDimensions);
+  const fontFamily =
+    sanitizeAssStyleValue(options.fontFamily ?? DEFAULT_SUBTITLE_FONT_FAMILY) ||
+    DEFAULT_SUBTITLE_FONT_FAMILY;
   const fontSize = scaleSubtitleMetric(
     BASE_SUBTITLE_FONT_SIZE,
     dimensions,
@@ -229,7 +242,7 @@ export function buildAssSubtitleFile(
     "",
     "[V4+ Styles]",
     "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    `Style: Default,Arial,${fontSize},&H00FFFFFF,&H00FFFFFF,&H00111111,&H99000000,-1,0,0,0,100,100,0,0,1,${outline},${shadow},2,${marginX},${marginX},${marginV},1`,
+    `Style: Default,${fontFamily},${fontSize},&H00FFFFFF,&H00FFFFFF,&H00111111,&H99000000,-1,0,0,0,100,100,0,0,1,${outline},${shadow},2,${marginX},${marginX},${marginV},1`,
     "",
     "[Events]",
     "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

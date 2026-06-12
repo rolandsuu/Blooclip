@@ -16,6 +16,9 @@ TRIGGER_SECRET_KEY=
 ASSEMBLYAI_API_KEY=
 OPENAI_API_KEY=
 OPENAI_WORKER_MODEL=gpt-5-mini
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=
+ELEVENLABS_VOICE_ID_ZH=
 GEMINI_API_KEY=
 GEMINI_VIDEO_MODEL=gemini-3.5-flash
 GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED=false
@@ -25,6 +28,12 @@ GEMINI_VIDEO_EVENT_ANALYSIS_REQUIRED=false
 `ASSEMBLYAI_BASE_URL` is optional and defaults to `https://api.assemblyai.com`.
 `OPENAI_BASE_URL` is optional and defaults to `https://api.openai.com/v1`.
 `OPENAI_WORKER_MODEL` is optional and defaults to `gpt-5-mini`.
+`ELEVENLABS_VOICE_ID` is the backward-compatible English/default voice.
+`ELEVENLABS_VOICE_ID_ZH` is required for Chinese output so Chinese TTS does not
+fall back to the English voice. `ELEVENLABS_VOICE_ID_EN` is optional; when set,
+English output uses it instead of `ELEVENLABS_VOICE_ID`.
+`ELEVENLABS_BASE_URL`, `ELEVENLABS_MODEL_ID`, and
+`ELEVENLABS_OUTPUT_FORMAT` are optional and default to ElevenLabs API defaults.
 `GEMINI_VIDEO_MODEL` is optional and defaults to `gemini-3.5-flash`.
 `GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED` controls optional Gemini whole-video
 event analysis. `GEMINI_VIDEO_EVENT_ANALYSIS_REQUIRED` defaults to `false`; when
