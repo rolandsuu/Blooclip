@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Link from "next/link";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -27,7 +28,22 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <header className="border-b border-gray-200 bg-white">
+          <nav className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4 px-6 py-3">
+            <Link href="/" className="text-sm font-semibold">
+              Blooclip
+            </Link>
+            <Link
+              href="/"
+              className="rounded border border-gray-300 px-4 py-2 text-sm font-medium"
+            >
+              New upload
+            </Link>
+          </nav>
+        </header>
+        {children}
+      </body>
     </html>
   );
 }
