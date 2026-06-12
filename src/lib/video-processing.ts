@@ -138,6 +138,7 @@ export async function queueVideoProcessing(
       provider_request_id: null,
       retryable: null,
       transcript_r2_key: null,
+      video_event_analysis_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
       instruction_doc_r2_key: null,

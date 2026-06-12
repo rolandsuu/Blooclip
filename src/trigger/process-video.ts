@@ -1,5 +1,11 @@
 import { task } from "@trigger.dev/sdk/v3";
 import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import {
+  FileState,
+  GoogleGenAI,
+  type File as GeminiFile,
+  type Part,
+} from "@google/genai";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -19,6 +25,12 @@ import { DEFAULT_TARGET_LANGUAGE } from "../lib/languages";
 import { r2, R2_BUCKET_NAME } from "../lib/r2";
 import { supabaseAdmin } from "../lib/supabase-admin";
 import {
+  VIDEO_EVENT_ANALYSIS_SCHEMA,
+  VideoEventAnalysisValidationError,
+  validateVideoEventAnalysis,
+  type VideoEventAnalysisArtifact,
+} from "../lib/video-event-analysis";
+import {
   buildAssSubtitleFile,
   buildClipScalePadFilters,
   readRenderDimensionsFromFfprobe,
@@ -34,6 +46,7 @@ type ProcessVideoPayload = {
 type VideoRow = {
   id: string;
   original_r2_key: string | null;
+  original_content_type: string | null;
   prompt: string | null;
   target_language: string | null;
 };
@@ -44,6 +57,8 @@ type WorkerStage =
   | "extracting_audio"
   | "transcribing_audio"
   | "transcript_ready"
+  | "analyzing_video_events"
+  | "video_event_analysis_ready"
   | "sampling_frames"
   | "analyzing_visuals"
   | "visual_analysis_ready"
@@ -122,9 +137,11 @@ const STAGE_PROGRESS: Record<WorkerStage, number> = {
   extracting_audio: 12,
   transcribing_audio: 24,
   transcript_ready: 24,
-  sampling_frames: 34,
-  analyzing_visuals: 48,
-  visual_analysis_ready: 48,
+  analyzing_video_events: 30,
+  video_event_analysis_ready: 32,
+  sampling_frames: 36,
+  analyzing_visuals: 50,
+  visual_analysis_ready: 50,
   planning_segments: 60,
   edit_plan_ready: 60,
   writing_instruction_document: 66,
@@ -146,6 +163,10 @@ const ASSEMBLYAI_POLL_INTERVAL_MS = 3000;
 const OPENAI_PROVIDER = "openai";
 const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_DEFAULT_MODEL = "gpt-5-mini";
+const GEMINI_PROVIDER = "gemini";
+const GEMINI_DEFAULT_MODEL = "gemini-3.5-flash";
+const GEMINI_FILE_PROCESSING_TIMEOUT_MS = 10 * 60 * 1000;
+const GEMINI_FILE_POLL_INTERVAL_MS = 3000;
 const ELEVENLABS_PROVIDER = "elevenlabs";
 const ELEVENLABS_DEFAULT_BASE_URL = "https://api.elevenlabs.io/v1";
 const ELEVENLABS_DEFAULT_MODEL = "eleven_multilingual_v2";
@@ -154,6 +175,7 @@ const DEFAULT_FRAME_SAMPLE_INTERVAL_SECONDS = 3;
 const DEFAULT_MAX_VISUAL_FRAMES = 30;
 const OPENAI_VISUAL_ANALYSIS_MAX_OUTPUT_TOKENS = 12000;
 const OPENAI_EDIT_PLAN_MAX_OUTPUT_TOKENS = 12000;
+const GEMINI_VIDEO_EVENT_ANALYSIS_MAX_OUTPUT_TOKENS = 8000;
 const MAX_TRANSCRIPT_CONTEXT_CHARS = 6000;
 const MAX_EDIT_PLAN_UTTERANCES = 80;
 const MAX_EDIT_PLAN_WORDS = 300;
@@ -522,7 +544,7 @@ async function updateVideo(videoId: string, values: Record<string, unknown>) {
 async function loadVideo(videoId: string) {
   const { data, error } = await supabaseAdmin
     .from("videos")
-    .select("id,original_r2_key,prompt,target_language")
+    .select("id,original_r2_key,original_content_type,prompt,target_language")
     .eq("id", videoId)
     .single();
 
@@ -691,6 +713,29 @@ function getPositiveIntegerEnv(name: string, fallback: number) {
   return value;
 }
 
+function getBooleanEnv(name: string, fallback: boolean) {
+  const rawValue = process.env[name];
+
+  if (!rawValue) {
+    return fallback;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  throw new WorkerError(`${name} must be true or false`, {
+    code: "worker_config_invalid",
+    retryable: false,
+  });
+}
+
 function getAssemblyAiConfig() {
   const apiKey = process.env.ASSEMBLYAI_API_KEY;
 
@@ -731,6 +776,67 @@ function getOpenAiConfig() {
     ),
     model: process.env.OPENAI_WORKER_MODEL ?? OPENAI_DEFAULT_MODEL,
   };
+}
+
+function getGeminiConfig() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const enabled = getBooleanEnv(
+    "GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED",
+    false
+  );
+  const required = getBooleanEnv(
+    "GEMINI_VIDEO_EVENT_ANALYSIS_REQUIRED",
+    false
+  );
+
+  if (required && !enabled) {
+    throw new WorkerError(
+      "Gemini video event analysis is required but disabled. Set GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED=true.",
+      {
+        code: "gemini_video_event_analysis_disabled",
+        provider: GEMINI_PROVIDER,
+        retryable: false,
+      }
+    );
+  }
+
+  if ((enabled || required) && !apiKey) {
+    throw new WorkerError("Missing Gemini API key. Set GEMINI_API_KEY.", {
+      code: "gemini_api_key_missing",
+      provider: GEMINI_PROVIDER,
+      retryable: false,
+    });
+  }
+
+  return {
+    enabled,
+    required,
+    apiKey: apiKey ?? null,
+    model: process.env.GEMINI_VIDEO_MODEL ?? GEMINI_DEFAULT_MODEL,
+  };
+}
+
+function getGeminiVideoContentType(contentType: string | null) {
+  const normalized = contentType?.split(";")[0]?.trim().toLowerCase();
+
+  if (
+    normalized === "video/mp4" ||
+    normalized === "video/webm" ||
+    normalized === "video/quicktime"
+  ) {
+    return normalized;
+  }
+
+  throw new WorkerError(
+    `Unsupported or missing source video content type for Gemini: ${
+      contentType ?? "unknown"
+    }`,
+    {
+      code: "gemini_video_content_type_unsupported",
+      provider: GEMINI_PROVIDER,
+      retryable: false,
+    }
+  );
 }
 
 function getElevenLabsConfig() {
@@ -1092,10 +1198,12 @@ function buildFrameTimestamps(
 async function sampleFrames(
   videoId: string,
   inputPath: string,
-  framesDir: string
+  framesDir: string,
+  knownDurationSeconds?: number
 ) {
   const { intervalSeconds, maxFrames } = getFrameSamplingConfig();
-  const durationSeconds = await getVideoDurationSeconds(inputPath);
+  const durationSeconds =
+    knownDurationSeconds ?? (await getVideoDurationSeconds(inputPath));
   const timestamps = buildFrameTimestamps(
     durationSeconds,
     intervalSeconds,
@@ -1299,10 +1407,55 @@ function parseJsonObject(text: string) {
   const parsed = JSON.parse(withoutFence) as unknown;
 
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("OpenAI response JSON was not an object");
+    throw new Error("Model response JSON was not an object");
   }
 
   return parsed as Record<string, unknown>;
+}
+
+function buildProviderRunIds(ids: {
+  assemblyAiTranscriptId?: string | null;
+  geminiVideoEventResponseId?: string | null;
+  openAiVisualResponseId?: string | null;
+  openAiEditPlanResponseId?: string | null;
+  openAiInstructionDocumentResponseId?: string | null;
+  openAiScriptResponseId?: string | null;
+  elevenLabsTtsRequestId?: string | null;
+}) {
+  const providerRunIds: Record<string, string> = {};
+
+  if (ids.assemblyAiTranscriptId) {
+    providerRunIds.assemblyai_transcript_id = ids.assemblyAiTranscriptId;
+  }
+
+  if (ids.geminiVideoEventResponseId) {
+    providerRunIds.gemini_video_event_response_id =
+      ids.geminiVideoEventResponseId;
+  }
+
+  if (ids.openAiVisualResponseId) {
+    providerRunIds.openai_visual_response_id = ids.openAiVisualResponseId;
+  }
+
+  if (ids.openAiEditPlanResponseId) {
+    providerRunIds.openai_edit_plan_response_id =
+      ids.openAiEditPlanResponseId;
+  }
+
+  if (ids.openAiInstructionDocumentResponseId) {
+    providerRunIds.openai_instruction_document_response_id =
+      ids.openAiInstructionDocumentResponseId;
+  }
+
+  if (ids.openAiScriptResponseId) {
+    providerRunIds.openai_script_response_id = ids.openAiScriptResponseId;
+  }
+
+  if (ids.elevenLabsTtsRequestId) {
+    providerRunIds.elevenlabs_tts_request_id = ids.elevenLabsTtsRequestId;
+  }
+
+  return providerRunIds;
 }
 
 function compactTranscriptContext(transcript: AssemblyAiTranscriptResponse) {
@@ -1325,6 +1478,251 @@ function compactTranscriptContext(transcript: AssemblyAiTranscriptResponse) {
         : null,
     utteranceSamples: utterances,
   };
+}
+
+async function waitForGeminiFile(
+  ai: GoogleGenAI,
+  uploadedFile: GeminiFile,
+  providerRequestId: string | null
+) {
+  if (!uploadedFile.name) {
+    throw new WorkerError("Gemini file upload response was missing a file name", {
+      code: "gemini_file_upload_response_invalid",
+      provider: GEMINI_PROVIDER,
+      providerRequestId,
+      retryable: true,
+    });
+  }
+
+  let file = uploadedFile;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < GEMINI_FILE_PROCESSING_TIMEOUT_MS) {
+    if (file.state === FileState.FAILED) {
+      throw new WorkerError(
+        file.error?.message ?? "Gemini video file processing failed",
+        {
+          code: "gemini_file_processing_failed",
+          provider: GEMINI_PROVIDER,
+          providerRequestId: file.name,
+          retryable: true,
+        }
+      );
+    }
+
+    if (file.uri && (!file.state || file.state === FileState.ACTIVE)) {
+      return file;
+    }
+
+    await wait(GEMINI_FILE_POLL_INTERVAL_MS);
+    file = await ai.files.get({ name: uploadedFile.name });
+  }
+
+  throw new WorkerError("Gemini video file processing timed out", {
+    code: "gemini_file_processing_timeout",
+    provider: GEMINI_PROVIDER,
+    providerRequestId: uploadedFile.name,
+    retryable: true,
+  });
+}
+
+function buildVideoEventAnalysisInstructions(options: {
+  prompt: string;
+  targetLanguage: string;
+  transcript: AssemblyAiTranscriptResponse;
+  durationSeconds: number;
+}) {
+  return [
+    "Analyze the full source video for a video editing pipeline.",
+    "Return JSON only, following the required schema.",
+    "Identify the key events across the whole video, not just isolated frames.",
+    "The goal is to help a later edit planner preserve the most important tutorial or key-event moments.",
+    "Use source-video timestamps in seconds for every event and recommended segment.",
+    "Make timestamps precise enough for FFmpeg cutting, but do not invent certainty when the evidence is weak.",
+    "Recommended segments should preserve setup context, key action, result/confirmation, and final outcome when relevant.",
+    "For silent or unclear speech, write 'No speech evidence' in transcriptEvidence.",
+    "Keep all text concise and in English for internal editor use.",
+    "",
+    `User prompt, the main editing intent: ${options.prompt}`,
+    `Target language for later voiceover: ${options.targetLanguage}`,
+    `Source video duration: ${options.durationSeconds}s`,
+    "",
+    "Transcript context from original audio:",
+    JSON.stringify(compactTranscriptContext(options.transcript), null, 2),
+  ].join("\n");
+}
+
+async function analyzeVideoEvents(options: {
+  videoId: string;
+  sourceR2Key: string;
+  transcriptR2Key: string;
+  inputPath: string;
+  originalContentType: string;
+  prompt: string;
+  targetLanguage: string;
+  transcript: AssemblyAiTranscriptResponse;
+  durationSeconds: number;
+}): Promise<VideoEventAnalysisArtifact> {
+  const config = getGeminiConfig();
+
+  if (!config.enabled || !config.apiKey) {
+    throw new WorkerError("Gemini video event analysis is disabled", {
+      code: "gemini_video_event_analysis_disabled",
+      provider: GEMINI_PROVIDER,
+      retryable: false,
+    });
+  }
+
+  const ai = new GoogleGenAI({ apiKey: config.apiKey });
+  let uploadedFile: GeminiFile | null = null;
+
+  try {
+    uploadedFile = await ai.files.upload({
+      file: options.inputPath,
+      config: {
+        mimeType: options.originalContentType,
+        displayName: `blooclip-${options.videoId}`,
+      },
+    });
+    const activeFile = await waitForGeminiFile(
+      ai,
+      uploadedFile,
+      uploadedFile.name ?? null
+    );
+
+    if (!activeFile.uri) {
+      throw new WorkerError("Gemini file upload response was missing a URI", {
+        code: "gemini_file_upload_response_invalid",
+        provider: GEMINI_PROVIDER,
+        providerRequestId: activeFile.name ?? uploadedFile.name ?? null,
+        retryable: true,
+      });
+    }
+
+    const videoPart: Part = {
+      fileData: {
+        fileUri: activeFile.uri,
+        mimeType: activeFile.mimeType ?? options.originalContentType,
+      },
+    };
+
+    const response = await ai.models.generateContent({
+      model: config.model,
+      contents: [
+        {
+          role: "user",
+          parts: [
+            videoPart,
+            {
+              text: buildVideoEventAnalysisInstructions(options),
+            },
+          ],
+        },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseJsonSchema: VIDEO_EVENT_ANALYSIS_SCHEMA,
+        maxOutputTokens: GEMINI_VIDEO_EVENT_ANALYSIS_MAX_OUTPUT_TOKENS,
+        temperature: 0.2,
+      },
+    });
+
+    const outputText = response.text;
+    const providerRequestId = response.responseId ?? null;
+
+    if (!outputText) {
+      throw new WorkerError("Gemini video event analysis had no output text", {
+        code: "gemini_video_event_analysis_output_missing",
+        provider: GEMINI_PROVIDER,
+        providerRequestId,
+        retryable: true,
+      });
+    }
+
+    let parsedOutput: Record<string, unknown>;
+
+    try {
+      parsedOutput = parseJsonObject(outputText);
+    } catch (error) {
+      throw new WorkerError(
+        error instanceof Error
+          ? error.message
+          : "Gemini video event analysis JSON was invalid",
+        {
+          code: "gemini_video_event_analysis_json_invalid",
+          provider: GEMINI_PROVIDER,
+          providerRequestId,
+          retryable: true,
+        }
+      );
+    }
+
+    try {
+      const analysis = validateVideoEventAnalysis(parsedOutput, {
+        sourceDurationSeconds: options.durationSeconds,
+      });
+
+      return {
+        videoId: options.videoId,
+        sourceR2Key: options.sourceR2Key,
+        transcriptR2Key: options.transcriptR2Key,
+        provider: GEMINI_PROVIDER,
+        providerRequestId,
+        model: response.modelVersion ?? config.model,
+        completedAt: new Date().toISOString(),
+        sourceDurationSeconds: options.durationSeconds,
+        prompt: options.prompt,
+        targetLanguage: options.targetLanguage,
+        ...analysis,
+        rawResponse: {
+          responseId: response.responseId,
+          modelVersion: response.modelVersion,
+          promptFeedback: response.promptFeedback,
+          candidates: response.candidates,
+        },
+        usage: response.usageMetadata,
+      };
+    } catch (error) {
+      if (error instanceof VideoEventAnalysisValidationError) {
+        throw new WorkerError(error.message, {
+          code: "gemini_video_event_analysis_validation_failed",
+          provider: GEMINI_PROVIDER,
+          providerRequestId,
+          retryable: true,
+        });
+      }
+
+      throw error;
+    }
+  } catch (error) {
+    if (error instanceof WorkerError) {
+      throw error;
+    }
+
+    throw new WorkerError(
+      error instanceof Error
+        ? error.message
+        : "Gemini video event analysis failed",
+      {
+        code: "gemini_video_event_analysis_failed",
+        provider: GEMINI_PROVIDER,
+        providerRequestId: uploadedFile?.name ?? null,
+        retryable: true,
+      }
+    );
+  } finally {
+    if (uploadedFile?.name) {
+      try {
+        await ai.files.delete({ name: uploadedFile.name });
+      } catch (error) {
+        console.warn(
+          `Failed to delete Gemini file ${uploadedFile.name}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
 }
 
 function buildVisualAnalysisInstructions(options: {
@@ -1531,18 +1929,36 @@ function compactVisualTimelineForEditPlan(
   };
 }
 
+function compactVideoEventAnalysisForEditPlan(
+  videoEventAnalysis: VideoEventAnalysisArtifact | null | undefined
+) {
+  if (!videoEventAnalysis) {
+    return null;
+  }
+
+  return {
+    summary: videoEventAnalysis.summary,
+    primaryEventIndex: videoEventAnalysis.primaryEventIndex,
+    events: videoEventAnalysis.events,
+    recommendedSegments: videoEventAnalysis.recommendedSegments,
+    omittedRanges: videoEventAnalysis.omittedRanges,
+    warnings: videoEventAnalysis.warnings,
+  };
+}
+
 function buildEditPlanInstructions(options: {
   prompt: string;
   targetLanguage: string;
   transcript: AssemblyAiTranscriptResponse;
   visualTimeline: VisualTimelineArtifact;
+  videoEventAnalysis?: VideoEventAnalysisArtifact | null;
   durationSeconds: number;
 }) {
   return [
     "Create a tutorial-preserving edit plan for a video assembly pipeline.",
     "Return JSON only, following the required schema.",
     "This is not a generic highlight reel. Preserve tutorial logic and viewer understanding.",
-    "You are receiving transcript timing and sampled-frame visual analysis, not raw video.",
+    "You are receiving transcript timing, sampled-frame visual analysis, and optional whole-video Gemini event analysis.",
     "",
     `User prompt, the main editing intent: ${options.prompt}`,
     `Target language for later voiceover: ${options.targetLanguage}`,
@@ -1558,9 +1974,11 @@ function buildEditPlanInstructions(options: {
     "7. Prefer 3-8 selected segments, but allow fewer or more when tutorial clarity requires it.",
     "8. segments must contain at least one selected segment. Zero segments is invalid in all cases.",
     "9. If tutorial evidence is weak, create one fallback tutorial step named Best Available Tutorial Context, select the best available chronological source range, and add a warning. Do not return an empty segment list.",
-    "10. Use transcript timing as semantic evidence and visual timeline frames/candidate moments as visual evidence.",
-    "11. Keep titles, objectives, reasons, evidence, omittedContent reasons, and warnings concise.",
-    "12. Prefer no more than 8 tutorialSteps, 8 selected segments, and 8 omittedContent entries.",
+    "10. When Gemini video event analysis is available, use it as the high-level signal for what matters across the whole video.",
+    "11. AssemblyAI transcript remains the timing and semantic evidence for spoken steps.",
+    "12. OpenAI sampled-frame timeline remains corroborating visual evidence; do not let sparse frames override a stronger whole-video event unless transcript timing contradicts it.",
+    "13. Keep titles, objectives, reasons, evidence, omittedContent reasons, and warnings concise.",
+    "14. Prefer no more than 8 tutorialSteps, 8 selected segments, and 8 omittedContent entries.",
     "",
     "Segment timing rules:",
     "- sourceStart and sourceEnd are in source video seconds.",
@@ -1570,6 +1988,17 @@ function buildEditPlanInstructions(options: {
     "",
     "Transcript context with timing evidence:",
     JSON.stringify(compactTranscriptForEditPlan(options.transcript), null, 2),
+    "",
+    options.videoEventAnalysis
+      ? "Gemini whole-video event analysis:"
+      : "Gemini whole-video event analysis: not available; continue with transcript and sampled-frame evidence.",
+    options.videoEventAnalysis
+      ? JSON.stringify(
+          compactVideoEventAnalysisForEditPlan(options.videoEventAnalysis),
+          null,
+          2
+        )
+      : "",
     "",
     "Visual timeline context:",
     JSON.stringify(
@@ -1759,10 +2188,12 @@ async function planTutorialSegments(options: {
   sourceR2Key: string;
   transcriptR2Key: string;
   visualTimelineR2Key: string;
+  videoEventAnalysisR2Key?: string | null;
   prompt: string;
   targetLanguage: string;
   transcript: AssemblyAiTranscriptResponse;
   visualTimeline: VisualTimelineArtifact;
+  videoEventAnalysis?: VideoEventAnalysisArtifact | null;
   durationSeconds: number;
 }) {
   const { apiKey, baseUrl, model } = getOpenAiConfig();
@@ -1872,6 +2303,7 @@ async function planTutorialSegments(options: {
     sourceR2Key: options.sourceR2Key,
     transcriptR2Key: options.transcriptR2Key,
     visualTimelineR2Key: options.visualTimelineR2Key,
+    videoEventAnalysisR2Key: options.videoEventAnalysisR2Key ?? null,
     provider: OPENAI_PROVIDER,
     providerRequestId,
     model,
@@ -3718,6 +4150,7 @@ function toWorkerError(error: unknown) {
 export async function runProcessVideo(payload: ProcessVideoPayload) {
   let stage: WorkerStage = "queued";
   let transcriptId: string | null = null;
+  let geminiVideoEventResponseId: string | null = null;
   let openAiVisualResponseId: string | null = null;
   let openAiEditPlanResponseId: string | null = null;
   let openAiInstructionDocumentResponseId: string | null = null;
@@ -3737,6 +4170,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   const finalPath = path.join(workDir, "final.mp4");
   const audioR2Key = `artifacts/${payload.videoId}/audio.wav`;
   const transcriptR2Key = `artifacts/${payload.videoId}/transcript.json`;
+  const videoEventAnalysisR2Key = `artifacts/${payload.videoId}/video-event-analysis.json`;
   const visualTimelineR2Key = `artifacts/${payload.videoId}/visual-timeline.json`;
   const editPlanR2Key = `artifacts/${payload.videoId}/edit-plan.json`;
   const instructionDocR2Key = `artifacts/${payload.videoId}/instruction-document/document.json`;
@@ -3757,6 +4191,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       typeof video.target_language === "string" && video.target_language.trim()
         ? video.target_language.trim()
         : DEFAULT_TARGET_LANGUAGE;
+    const geminiConfig = getGeminiConfig();
 
     if (!originalR2Key) {
       throw new WorkerError("Video record is missing an original R2 key", {
@@ -3776,6 +4211,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       provider_request_id: null,
       retryable: null,
       transcript_r2_key: null,
+      video_event_analysis_r2_key: null,
       visual_timeline_r2_key: null,
       edit_plan_r2_key: null,
       instruction_doc_r2_key: null,
@@ -3790,6 +4226,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     await updateStage(payload.videoId, stage);
     await downloadFromR2(originalR2Key, inputPath);
     const renderDimensions = await getSourceRenderDimensions(inputPath);
+    const sourceDurationSeconds = roundSeconds(
+      await getVideoDurationSeconds(inputPath)
+    );
 
     stage = "extracting_audio";
     await updateStage(payload.videoId, stage);
@@ -3817,9 +4256,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     transcriptId = await submitAssemblyAiTranscript(assemblyAiAudioUrl);
     await updateVideo(payload.videoId, {
       provider_request_id: transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+      }),
     });
     const transcript = await pollAssemblyAiTranscript(transcriptId);
 
@@ -3856,21 +4295,80 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
       provider_request_id: transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
       retryable: null,
     });
 
+    let videoEventAnalysis: VideoEventAnalysisArtifact | null = null;
+
+    if (geminiConfig.enabled) {
+      stage = "analyzing_video_events";
+      await updateStage(payload.videoId, stage);
+
+      try {
+        videoEventAnalysis = await analyzeVideoEvents({
+          videoId: payload.videoId,
+          sourceR2Key: originalR2Key,
+          transcriptR2Key,
+          inputPath,
+          originalContentType: getGeminiVideoContentType(
+            video.original_content_type
+          ),
+          prompt,
+          targetLanguage,
+          transcript,
+          durationSeconds: sourceDurationSeconds,
+        });
+        geminiVideoEventResponseId =
+          typeof videoEventAnalysis.providerRequestId === "string"
+            ? videoEventAnalysis.providerRequestId
+            : null;
+        await uploadJsonToR2(videoEventAnalysisR2Key, videoEventAnalysis);
+
+        stage = "video_event_analysis_ready";
+        await updateVideo(payload.videoId, {
+          status: "processing",
+          current_stage: stage,
+          progress: STAGE_PROGRESS[stage],
+          transcript_r2_key: transcriptR2Key,
+          video_event_analysis_r2_key: videoEventAnalysisR2Key,
+          provider_request_id: geminiVideoEventResponseId ?? transcriptId,
+          provider_run_ids: buildProviderRunIds({
+            assemblyAiTranscriptId: transcriptId,
+            geminiVideoEventResponseId,
+          }),
+          error_message: null,
+          error_code: null,
+          error_provider: null,
+          retryable: null,
+        });
+      } catch (error) {
+        const geminiError = toWorkerError(error);
+
+        if (geminiConfig.required) {
+          throw geminiError;
+        }
+
+        console.warn(
+          `Skipping optional Gemini video event analysis for ${payload.videoId}: ${geminiError.message}`
+        );
+        videoEventAnalysis = null;
+        geminiVideoEventResponseId = null;
+      }
+    }
+
     stage = "sampling_frames";
     await updateStage(payload.videoId, stage);
     const sampledFrameResult = await sampleFrames(
       payload.videoId,
       inputPath,
-      framesDir
+      framesDir,
+      sourceDurationSeconds
     );
 
     stage = "analyzing_visuals";
@@ -3899,12 +4397,17 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
-      provider_request_id: openAiVisualResponseId ?? transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-      },
+      provider_request_id:
+        openAiVisualResponseId ?? geminiVideoEventResponseId ?? transcriptId,
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -3918,10 +4421,14 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       sourceR2Key: originalR2Key,
       transcriptR2Key,
       visualTimelineR2Key,
+      videoEventAnalysisR2Key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       prompt,
       targetLanguage,
       transcript,
       visualTimeline,
+      videoEventAnalysis,
       durationSeconds: sampledFrameResult.durationSeconds,
     });
     openAiEditPlanResponseId =
@@ -3936,15 +4443,22 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
       provider_request_id:
-        openAiEditPlanResponseId ?? openAiVisualResponseId ?? transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-        openai_edit_plan_response_id: openAiEditPlanResponseId,
-      },
+        openAiEditPlanResponseId ??
+        openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
+        transcriptId,
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+        openAiEditPlanResponseId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -4011,6 +4525,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
       instruction_doc_r2_key: instructionDocR2Key,
@@ -4019,14 +4536,15 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
         transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-        openai_edit_plan_response_id: openAiEditPlanResponseId,
-        openai_instruction_document_response_id:
-          openAiInstructionDocumentResponseId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+        openAiEditPlanResponseId,
+        openAiInstructionDocumentResponseId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -4066,6 +4584,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
       instruction_doc_r2_key: instructionDocR2Key,
@@ -4076,15 +4597,16 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
         transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-        openai_edit_plan_response_id: openAiEditPlanResponseId,
-        openai_instruction_document_response_id:
-          openAiInstructionDocumentResponseId,
-        openai_script_response_id: openAiScriptResponseId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+        openAiEditPlanResponseId,
+        openAiInstructionDocumentResponseId,
+        openAiScriptResponseId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -4124,6 +4646,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
       instruction_doc_r2_key: instructionDocR2Key,
@@ -4136,16 +4661,17 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
         transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-        openai_edit_plan_response_id: openAiEditPlanResponseId,
-        openai_instruction_document_response_id:
-          openAiInstructionDocumentResponseId,
-        openai_script_response_id: openAiScriptResponseId,
-        elevenlabs_tts_request_id: elevenLabsTtsRequestId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+        openAiEditPlanResponseId,
+        openAiInstructionDocumentResponseId,
+        openAiScriptResponseId,
+        elevenLabsTtsRequestId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -4182,6 +4708,9 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       current_stage: stage,
       progress: STAGE_PROGRESS[stage],
       transcript_r2_key: transcriptR2Key,
+      video_event_analysis_r2_key: videoEventAnalysis
+        ? videoEventAnalysisR2Key
+        : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
       instruction_doc_r2_key: instructionDocR2Key,
@@ -4195,16 +4724,17 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
         transcriptId,
-      provider_run_ids: {
-        assemblyai_transcript_id: transcriptId,
-        openai_visual_response_id: openAiVisualResponseId,
-        openai_edit_plan_response_id: openAiEditPlanResponseId,
-        openai_instruction_document_response_id:
-          openAiInstructionDocumentResponseId,
-        openai_script_response_id: openAiScriptResponseId,
-        elevenlabs_tts_request_id: elevenLabsTtsRequestId,
-      },
+      provider_run_ids: buildProviderRunIds({
+        assemblyAiTranscriptId: transcriptId,
+        geminiVideoEventResponseId,
+        openAiVisualResponseId,
+        openAiEditPlanResponseId,
+        openAiInstructionDocumentResponseId,
+        openAiScriptResponseId,
+        elevenLabsTtsRequestId,
+      }),
       error_message: null,
       error_code: null,
       error_provider: null,
@@ -4225,6 +4755,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         openAiInstructionDocumentResponseId ??
         openAiEditPlanResponseId ??
         openAiVisualResponseId ??
+        geminiVideoEventResponseId ??
         transcriptId,
       retryable: workerError.retryable,
     });

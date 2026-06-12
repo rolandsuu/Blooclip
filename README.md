@@ -16,16 +16,28 @@ TRIGGER_SECRET_KEY=
 ASSEMBLYAI_API_KEY=
 OPENAI_API_KEY=
 OPENAI_WORKER_MODEL=gpt-5-mini
+GEMINI_API_KEY=
+GEMINI_VIDEO_MODEL=gemini-3.5-flash
+GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED=false
+GEMINI_VIDEO_EVENT_ANALYSIS_REQUIRED=false
 ```
 
 `ASSEMBLYAI_BASE_URL` is optional and defaults to `https://api.assemblyai.com`.
 `OPENAI_BASE_URL` is optional and defaults to `https://api.openai.com/v1`.
 `OPENAI_WORKER_MODEL` is optional and defaults to `gpt-5-mini`.
+`GEMINI_VIDEO_MODEL` is optional and defaults to `gemini-3.5-flash`.
+`GEMINI_VIDEO_EVENT_ANALYSIS_ENABLED` controls optional Gemini whole-video
+event analysis. `GEMINI_VIDEO_EVENT_ANALYSIS_REQUIRED` defaults to `false`; when
+it is `false`, Gemini failures are logged and the existing transcript plus
+sampled-frame pipeline continues.
 `VISUAL_FRAME_SAMPLE_INTERVAL_SECONDS` and
 `VISUAL_FRAME_SAMPLE_MAX_FRAMES` are optional visual-analysis worker settings
 and default to `3` and `30`.
 
 Before running the worker against a fresh database, apply the Supabase migrations in `supabase/migrations/` in order.
+For production Gemini rollout, apply
+`supabase/migrations/20260612000000_add_video_event_analysis_field.sql` before
+deploying app or worker code that reads `video_event_analysis_r2_key`.
 
 First, run the development server:
 
