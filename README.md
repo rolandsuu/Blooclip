@@ -25,8 +25,7 @@ OPENAI_WORKER_MODEL=gpt-5-mini
 `VISUAL_FRAME_SAMPLE_MAX_FRAMES` are optional visual-analysis worker settings
 and default to `3` and `30`.
 
-Before running the worker, apply the Supabase migration in
-`supabase/migrations/20260606000000_add_worker_artifact_fields.sql`.
+Before running the worker against a fresh database, apply the Supabase migrations in `supabase/migrations/` in order.
 
 First, run the development server:
 
