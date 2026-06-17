@@ -12,6 +12,10 @@ const DEFAULT_UPLOAD_PROMPT =
   "Create a key-event video with voiceover and subtitles";
 const MAX_BATCH_UPLOAD_FILES = 20;
 const UPLOAD_CONCURRENCY = 3;
+const R2_UPLOAD_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
+const R2_UPLOAD_IDLE_TIMEOUT_MS = 90 * 1000;
+const R2_UPLOAD_WATCHDOG_INTERVAL_MS = 5000;
+const R2_UPLOAD_PROGRESS_UPDATE_MS = 250;
 
 type UploadItemStatus =
   | "pending"
@@ -27,6 +31,9 @@ type UploadItem = {
   status: UploadItemStatus;
   message: string;
   videoId: string | null;
+  uploadProgress: number | null;
+  uploadedBytes: number;
+  uploadSpeedBytesPerSecond: number | null;
 };
 
 type BatchUploadVideo = {
@@ -39,6 +46,13 @@ type BatchUploadVideo = {
 type CreateBatchUploadResponse = {
   batchId: string;
   videos: BatchUploadVideo[];
+};
+
+type UploadProgress = {
+  loaded: number;
+  total: number;
+  percent: number;
+  speedBytesPerSecond: number | null;
 };
 
 async function readErrorMessage(response: Response, fallback: string) {
@@ -105,6 +119,9 @@ function createUploadItem(file: File): UploadItem {
     status: "pending",
     message: "Ready",
     videoId: null,
+    uploadProgress: null,
+    uploadedBytes: 0,
+    uploadSpeedBytesPerSecond: null,
   };
 }
 
@@ -145,6 +162,141 @@ function formatBytes(bytes: number) {
   }
 
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatUploadSpeed(bytesPerSecond: number | null) {
+  if (!bytesPerSecond || bytesPerSecond <= 0) {
+    return "calculating speed";
+  }
+
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatUploadProgress(progress: UploadProgress) {
+  return `${progress.percent}% (${formatBytes(progress.loaded)} of ${formatBytes(
+    progress.total
+  )}, ${formatUploadSpeed(progress.speedBytesPerSecond)})`;
+}
+
+function uploadFileToR2(
+  uploadUrl: string,
+  file: File,
+  contentType: string,
+  onProgress: (progress: UploadProgress) => void
+) {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const startedAt = Date.now();
+    const totalBytes = file.size;
+    let lastProgressAt = startedAt;
+    let lastReportedAt = 0;
+    let lastReportedLoaded = -1;
+    let settled = false;
+    let abortMessage = "R2 upload was aborted before it finished.";
+
+    const watchdog = window.setInterval(() => {
+      if (settled) {
+        return;
+      }
+
+      if (Date.now() - lastProgressAt > R2_UPLOAD_IDLE_TIMEOUT_MS) {
+        abortMessage =
+          "R2 upload stalled. No upload progress was reported for 90 seconds.";
+        xhr.abort();
+      }
+    }, R2_UPLOAD_WATCHDOG_INTERVAL_MS);
+
+    function cleanup() {
+      settled = true;
+      window.clearInterval(watchdog);
+    }
+
+    function reportProgress(loaded: number, force = false) {
+      const now = Date.now();
+
+      if (
+        !force &&
+        now - lastReportedAt < R2_UPLOAD_PROGRESS_UPDATE_MS &&
+        loaded !== totalBytes
+      ) {
+        return;
+      }
+
+      lastReportedAt = now;
+      lastReportedLoaded = loaded;
+      lastProgressAt = now;
+
+      const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
+      const percent =
+        totalBytes > 0
+          ? Math.min(99, Math.max(0, Math.round((loaded / totalBytes) * 100)))
+          : null;
+
+      onProgress({
+        loaded,
+        total: totalBytes,
+        percent: percent ?? 0,
+        speedBytesPerSecond: loaded > 0 ? loaded / elapsedSeconds : null,
+      });
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        reportProgress(event.loaded);
+        return;
+      }
+
+      lastProgressAt = Date.now();
+    };
+
+    xhr.onload = () => {
+      cleanup();
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        reportProgress(totalBytes, true);
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `R2 upload failed with HTTP ${xhr.status}${
+            xhr.statusText ? ` ${xhr.statusText}` : ""
+          }`
+        )
+      );
+    };
+
+    xhr.onerror = () => {
+      cleanup();
+      reject(
+        new Error(
+          "R2 upload failed. The browser could not reach Cloudflare R2, or the bucket CORS rule rejected the upload."
+        )
+      );
+    };
+
+    xhr.ontimeout = () => {
+      cleanup();
+      reject(new Error("R2 upload timed out after 15 minutes."));
+    };
+
+    xhr.onabort = () => {
+      cleanup();
+
+      if (lastReportedLoaded >= totalBytes) {
+        return;
+      }
+
+      reject(new Error(abortMessage));
+    };
+
+    xhr.open("PUT", uploadUrl);
+    xhr.timeout = R2_UPLOAD_TOTAL_TIMEOUT_MS;
+    xhr.setRequestHeader("Content-Type", contentType);
+    reportProgress(0, true);
+    xhr.send(file);
+  });
 }
 
 export default function Home() {
@@ -222,29 +374,35 @@ export default function Home() {
   ) {
     updateItem(item.id, {
       status: "uploading",
-      message: "Uploading to R2...",
+      message: `Uploading to R2... 0% (0 B of ${formatBytes(
+        item.file.size
+      )}, calculating speed)`,
       videoId: upload.videoId,
+      uploadProgress: 0,
+      uploadedBytes: 0,
+      uploadSpeedBytesPerSecond: null,
     });
 
-    let shouldMarkUploadFailed = false;
-
     try {
-      const r2Response = await fetch(upload.uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": item.file.type,
-        },
-        body: item.file,
-      });
-
-      if (!r2Response.ok) {
-        shouldMarkUploadFailed = true;
-        throw new Error(`R2 upload failed with HTTP ${r2Response.status}`);
-      }
+      await uploadFileToR2(
+        upload.uploadUrl,
+        item.file,
+        item.file.type,
+        (progress) => {
+          updateItem(item.id, {
+            uploadProgress: progress.percent,
+            uploadedBytes: progress.loaded,
+            uploadSpeedBytesPerSecond: progress.speedBytesPerSecond,
+            message: `Uploading to R2... ${formatUploadProgress(progress)}`,
+          });
+        }
+      );
 
       updateItem(item.id, {
         status: "queueing",
         message: "Confirming upload and queueing worker...",
+        uploadProgress: 100,
+        uploadedBytes: item.file.size,
       });
 
       const completeResponse = await fetch(
@@ -255,7 +413,6 @@ export default function Home() {
       );
 
       if (!completeResponse.ok) {
-        shouldMarkUploadFailed = true;
         throw new Error(
           await readErrorMessage(completeResponse, "Failed to confirm upload")
         );
@@ -264,13 +421,12 @@ export default function Home() {
       updateItem(item.id, {
         status: "queued",
         message: "Worker queued",
+        uploadProgress: 100,
+        uploadedBytes: item.file.size,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Upload failed";
-
-      if (shouldMarkUploadFailed) {
-        await markUploadFailed(upload.videoId, message);
-      }
+      await markUploadFailed(upload.videoId, message);
 
       updateItem(item.id, {
         status: "failed",
@@ -323,6 +479,9 @@ export default function Home() {
           status: "pending",
           message: "Creating upload URL...",
           videoId: null,
+          uploadProgress: null,
+          uploadedBytes: 0,
+          uploadSpeedBytesPerSecond: null,
         }))
       );
 
@@ -469,6 +628,25 @@ export default function Home() {
                   <span className="font-mono">{item.status}</span>
                   <span className="text-gray-600">{item.message}</span>
                 </div>
+                {item.uploadProgress !== null && (
+                  <div className="grid gap-2">
+                    <div className="h-2 overflow-hidden rounded bg-gray-200">
+                      <div
+                        className="h-full rounded bg-black transition-all"
+                        style={{ width: `${item.uploadProgress}%` }}
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500">
+                      <span>
+                        {formatBytes(item.uploadedBytes)} /{" "}
+                        {formatBytes(item.file.size)}
+                      </span>
+                      <span>
+                        {formatUploadSpeed(item.uploadSpeedBytesPerSecond)}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
