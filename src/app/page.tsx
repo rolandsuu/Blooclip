@@ -1,667 +1,421 @@
-"use client";
-
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-
 import {
   DEFAULT_TARGET_LANGUAGE,
   TARGET_LANGUAGE_OPTIONS,
 } from "@/lib/languages";
 
-const DEFAULT_UPLOAD_PROMPT =
-  "Create a key-event video with voiceover and subtitles";
-const MAX_BATCH_UPLOAD_FILES = 20;
-const UPLOAD_CONCURRENCY = 3;
-const R2_UPLOAD_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
-const R2_UPLOAD_IDLE_TIMEOUT_MS = 90 * 1000;
-const R2_UPLOAD_WATCHDOG_INTERVAL_MS = 5000;
-const R2_UPLOAD_PROGRESS_UPDATE_MS = 250;
+const recentTutorials = [
+  {
+    title: "Machine filter replacement",
+    meta: "Draft ready",
+    active: true,
+  },
+  {
+    title: "Warehouse scanner onboarding",
+    meta: "Generated yesterday",
+    active: false,
+  },
+  {
+    title: "Packing station safety",
+    meta: "Instruction PDF ready",
+    active: false,
+  },
+  {
+    title: "Quality check walkthrough",
+    meta: "Final video exported",
+    active: false,
+  },
+];
 
-type UploadItemStatus =
-  | "pending"
-  | "uploading"
-  | "queueing"
-  | "queued"
-  | "failed";
+const sourceVideos = [
+  {
+    name: "filter-change-step-1.mp4",
+    detail: "2:14 - 184 MB",
+  },
+  {
+    name: "operator-closeup.mov",
+    detail: "0:58 - 76 MB",
+  },
+  {
+    name: "finished-check.webm",
+    detail: "1:31 - 122 MB",
+  },
+];
 
-type UploadItem = {
-  id: string;
-  file: File;
-  prompt: string;
-  status: UploadItemStatus;
-  message: string;
-  videoId: string | null;
-  uploadProgress: number | null;
-  uploadedBytes: number;
-  uploadSpeedBytesPerSecond: number | null;
-};
+const automationSteps = [
+  {
+    title: "Find the key teaching steps",
+    status: "Done",
+    description: "Source videos are grouped into a clear beginner flow.",
+  },
+  {
+    title: "Write voiceover and subtitles",
+    status: "Done",
+    description: "Narration explains each action without manual editing.",
+  },
+  {
+    title: "Export tutorial package",
+    status: "Ready",
+    description: "Final video and instruction PDF are prepared together.",
+  },
+];
 
-type BatchUploadVideo = {
-  videoId: string;
-  uploadUrl: string;
-  filename: string;
-  batchPosition: number;
-};
+const deliverables = [
+  "Final video",
+  "Instruction PDF",
+  "Voiceover script",
+  "Subtitles",
+];
 
-type CreateBatchUploadResponse = {
-  batchId: string;
-  videos: BatchUploadVideo[];
-};
-
-type UploadProgress = {
-  loaded: number;
-  total: number;
-  percent: number;
-  speedBytesPerSecond: number | null;
-};
-
-async function readErrorMessage(response: Response, fallback: string) {
-  const text = await response.text().catch(() => "");
-
-  if (!text) {
-    return fallback;
-  }
-
-  try {
-    const data = JSON.parse(text) as { error?: unknown };
-
-    if (typeof data.error === "string" && data.error.trim()) {
-      return data.error;
-    }
-  } catch {
-    return text;
-  }
-
-  return fallback;
-}
-
-function isBatchUploadVideo(data: unknown): data is BatchUploadVideo {
-  if (typeof data !== "object" || data === null) {
-    return false;
-  }
-
+function AppMark() {
   return (
-    "videoId" in data &&
-    "uploadUrl" in data &&
-    "filename" in data &&
-    "batchPosition" in data &&
-    typeof data.videoId === "string" &&
-    typeof data.uploadUrl === "string" &&
-    typeof data.filename === "string" &&
-    typeof data.batchPosition === "number"
+    <div className="flex h-9 w-9 items-center justify-center rounded-md bg-[#0f766e] text-sm font-semibold text-white shadow-sm shadow-teal-900/10">
+      B
+    </div>
   );
 }
 
-function isCreateBatchUploadResponse(
-  data: unknown
-): data is CreateBatchUploadResponse {
-  if (typeof data !== "object" || data === null) {
-    return false;
-  }
-
+function Sidebar() {
   return (
-    "batchId" in data &&
-    "videos" in data &&
-    typeof data.batchId === "string" &&
-    Array.isArray(data.videos) &&
-    data.videos.every(isBatchUploadVideo)
-  );
-}
-
-function createUploadItem(file: File): UploadItem {
-  return {
-    id:
-      typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${file.name}-${file.size}-${Date.now()}-${Math.random()}`,
-    file,
-    prompt: DEFAULT_UPLOAD_PROMPT,
-    status: "pending",
-    message: "Ready",
-    videoId: null,
-    uploadProgress: null,
-    uploadedBytes: 0,
-    uploadSpeedBytesPerSecond: null,
-  };
-}
-
-function getFilenameTitle(filename: string) {
-  const lastDotIndex = filename.lastIndexOf(".");
-
-  if (lastDotIndex <= 0) {
-    return filename;
-  }
-
-  return filename.slice(0, lastDotIndex);
-}
-
-function getDefaultBatchTitle(files: File[]) {
-  if (files.length === 1) {
-    return getFilenameTitle(files[0].name);
-  }
-
-  if (files.length > 1) {
-    return `Bulk upload - ${files.length} videos`;
-  }
-
-  return "New video batch";
-}
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
-}
-
-function formatUploadSpeed(bytesPerSecond: number | null) {
-  if (!bytesPerSecond || bytesPerSecond <= 0) {
-    return "calculating speed";
-  }
-
-  return `${formatBytes(bytesPerSecond)}/s`;
-}
-
-function formatUploadProgress(progress: UploadProgress) {
-  return `${progress.percent}% (${formatBytes(progress.loaded)} of ${formatBytes(
-    progress.total
-  )}, ${formatUploadSpeed(progress.speedBytesPerSecond)})`;
-}
-
-function uploadFileToR2(
-  uploadUrl: string,
-  file: File,
-  contentType: string,
-  onProgress: (progress: UploadProgress) => void
-) {
-  return new Promise<void>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    const startedAt = Date.now();
-    const totalBytes = file.size;
-    let lastProgressAt = startedAt;
-    let lastReportedAt = 0;
-    let lastReportedLoaded = -1;
-    let settled = false;
-    let abortMessage = "R2 upload was aborted before it finished.";
-
-    const watchdog = window.setInterval(() => {
-      if (settled) {
-        return;
-      }
-
-      if (Date.now() - lastProgressAt > R2_UPLOAD_IDLE_TIMEOUT_MS) {
-        abortMessage =
-          "R2 upload stalled. No upload progress was reported for 90 seconds.";
-        xhr.abort();
-      }
-    }, R2_UPLOAD_WATCHDOG_INTERVAL_MS);
-
-    function cleanup() {
-      settled = true;
-      window.clearInterval(watchdog);
-    }
-
-    function reportProgress(loaded: number, force = false) {
-      const now = Date.now();
-
-      if (
-        !force &&
-        now - lastReportedAt < R2_UPLOAD_PROGRESS_UPDATE_MS &&
-        loaded !== totalBytes
-      ) {
-        return;
-      }
-
-      lastReportedAt = now;
-      lastReportedLoaded = loaded;
-      lastProgressAt = now;
-
-      const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
-      const percent =
-        totalBytes > 0
-          ? Math.min(99, Math.max(0, Math.round((loaded / totalBytes) * 100)))
-          : null;
-
-      onProgress({
-        loaded,
-        total: totalBytes,
-        percent: percent ?? 0,
-        speedBytesPerSecond: loaded > 0 ? loaded / elapsedSeconds : null,
-      });
-    }
-
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable) {
-        reportProgress(event.loaded);
-        return;
-      }
-
-      lastProgressAt = Date.now();
-    };
-
-    xhr.onload = () => {
-      cleanup();
-
-      if (xhr.status >= 200 && xhr.status < 300) {
-        reportProgress(totalBytes, true);
-        resolve();
-        return;
-      }
-
-      reject(
-        new Error(
-          `R2 upload failed with HTTP ${xhr.status}${
-            xhr.statusText ? ` ${xhr.statusText}` : ""
-          }`
-        )
-      );
-    };
-
-    xhr.onerror = () => {
-      cleanup();
-      reject(
-        new Error(
-          "R2 upload failed. The browser could not reach Cloudflare R2, or the bucket CORS rule rejected the upload."
-        )
-      );
-    };
-
-    xhr.ontimeout = () => {
-      cleanup();
-      reject(new Error("R2 upload timed out after 15 minutes."));
-    };
-
-    xhr.onabort = () => {
-      cleanup();
-
-      if (lastReportedLoaded >= totalBytes) {
-        return;
-      }
-
-      reject(new Error(abortMessage));
-    };
-
-    xhr.open("PUT", uploadUrl);
-    xhr.timeout = R2_UPLOAD_TOTAL_TIMEOUT_MS;
-    xhr.setRequestHeader("Content-Type", contentType);
-    reportProgress(0, true);
-    xhr.send(file);
-  });
-}
-
-export default function Home() {
-  const router = useRouter();
-  const [items, setItems] = useState<UploadItem[]>([]);
-  const [batchTitle, setBatchTitle] = useState("New video batch");
-  const [titleTouched, setTitleTouched] = useState(false);
-  const [targetLanguage, setTargetLanguage] = useState<string>(
-    DEFAULT_TARGET_LANGUAGE
-  );
-  const [status, setStatus] = useState("Choose one or more videos");
-  const [isUploading, setIsUploading] = useState(false);
-
-  function updateItem(id: string, patch: Partial<UploadItem>) {
-    setItems((currentItems) =>
-      currentItems.map((item) =>
-        item.id === id ? { ...item, ...patch } : item
-      )
-    );
-  }
-
-  function handleFilesSelected(fileList: FileList | null) {
-    if (isUploading) return;
-
-    const selectedFiles = Array.from(fileList ?? []);
-    const limitedFiles = selectedFiles.slice(0, MAX_BATCH_UPLOAD_FILES);
-    const nextItems = limitedFiles.map(createUploadItem);
-
-    setItems(nextItems);
-
-    if (!titleTouched) {
-      setBatchTitle(getDefaultBatchTitle(limitedFiles));
-    }
-
-    if (selectedFiles.length > MAX_BATCH_UPLOAD_FILES) {
-      setStatus(`Only the first ${MAX_BATCH_UPLOAD_FILES} videos were added.`);
-    } else if (selectedFiles.length > 0) {
-      setStatus(`${selectedFiles.length} video file(s) ready.`);
-    } else {
-      setStatus("Choose one or more videos");
-    }
-  }
-
-  function updatePrompt(id: string, prompt: string) {
-    updateItem(id, { prompt });
-  }
-
-  function removeItem(id: string) {
-    if (isUploading) return;
-
-    setItems((currentItems) => {
-      const nextItems = currentItems.filter((item) => item.id !== id);
-
-      if (!titleTouched) {
-        setBatchTitle(getDefaultBatchTitle(nextItems.map((item) => item.file)));
-      }
-
-      return nextItems;
-    });
-  }
-
-  async function markUploadFailed(videoId: string, message: string) {
-    await fetch(`/api/videos/${videoId}/upload-failed`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ error: message }),
-    }).catch(() => undefined);
-  }
-
-  async function uploadItem(
-    item: UploadItem,
-    upload: BatchUploadVideo
-  ) {
-    updateItem(item.id, {
-      status: "uploading",
-      message: `Uploading to R2... 0% (0 B of ${formatBytes(
-        item.file.size
-      )}, calculating speed)`,
-      videoId: upload.videoId,
-      uploadProgress: 0,
-      uploadedBytes: 0,
-      uploadSpeedBytesPerSecond: null,
-    });
-
-    try {
-      await uploadFileToR2(
-        upload.uploadUrl,
-        item.file,
-        item.file.type,
-        (progress) => {
-          updateItem(item.id, {
-            uploadProgress: progress.percent,
-            uploadedBytes: progress.loaded,
-            uploadSpeedBytesPerSecond: progress.speedBytesPerSecond,
-            message: `Uploading to R2... ${formatUploadProgress(progress)}`,
-          });
-        }
-      );
-
-      updateItem(item.id, {
-        status: "queueing",
-        message: "Confirming upload and queueing worker...",
-        uploadProgress: 100,
-        uploadedBytes: item.file.size,
-      });
-
-      const completeResponse = await fetch(
-        `/api/videos/${upload.videoId}/complete-upload`,
-        {
-          method: "POST",
-        }
-      );
-
-      if (!completeResponse.ok) {
-        throw new Error(
-          await readErrorMessage(completeResponse, "Failed to confirm upload")
-        );
-      }
-
-      updateItem(item.id, {
-        status: "queued",
-        message: "Worker queued",
-        uploadProgress: 100,
-        uploadedBytes: item.file.size,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Upload failed";
-      await markUploadFailed(upload.videoId, message);
-
-      updateItem(item.id, {
-        status: "failed",
-        message,
-      });
-    }
-  }
-
-  async function runUploads(
-    uploadItems: UploadItem[],
-    uploadVideos: BatchUploadVideo[]
-  ) {
-    let nextIndex = 0;
-    const workers = Array.from({
-      length: Math.min(UPLOAD_CONCURRENCY, uploadItems.length),
-    }).map(async () => {
-      while (nextIndex < uploadItems.length) {
-        const itemIndex = nextIndex;
-        nextIndex += 1;
-
-        const upload = uploadVideos.find(
-          (video) => video.batchPosition === itemIndex
-        );
-
-        if (!upload) {
-          updateItem(uploadItems[itemIndex].id, {
-            status: "failed",
-            message: "Upload API response did not include this file",
-          });
-          continue;
-        }
-
-        await uploadItem(uploadItems[itemIndex], upload);
-      }
-    });
-
-    await Promise.all(workers);
-  }
-
-  async function uploadBatch() {
-    if (items.length === 0 || isUploading) return;
-
-    setIsUploading(true);
-
-    try {
-      setStatus("Creating batch upload URLs...");
-      setItems((currentItems) =>
-        currentItems.map((item) => ({
-          ...item,
-          status: "pending",
-          message: "Creating upload URL...",
-          videoId: null,
-          uploadProgress: null,
-          uploadedBytes: 0,
-          uploadSpeedBytesPerSecond: null,
-        }))
-      );
-
-      const uploadItems = items;
-      const createResponse = await fetch("/api/video-batches/create-upload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          title:
-            batchTitle.trim() ||
-            getDefaultBatchTitle(items.map((item) => item.file)),
-          targetLanguage,
-          videos: uploadItems.map((item) => ({
-            filename: item.file.name,
-            contentType: item.file.type,
-            size: item.file.size,
-            prompt: item.prompt.trim() || DEFAULT_UPLOAD_PROMPT,
-          })),
-        }),
-      });
-
-      if (!createResponse.ok) {
-        setStatus(
-          await readErrorMessage(createResponse, "Failed to create upload")
-        );
-        return;
-      }
-
-      const batchData = (await createResponse.json()) as unknown;
-
-      if (!isCreateBatchUploadResponse(batchData)) {
-        setStatus("Upload API response was invalid");
-        return;
-      }
-
-      setStatus(`Uploading ${uploadItems.length} video file(s)...`);
-      await runUploads(uploadItems, batchData.videos);
-      setStatus("Upload finished. Opening batch status...");
-      router.push(`/video-batches/${batchData.batchId}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Upload failed");
-    } finally {
-      setIsUploading(false);
-    }
-  }
-
-  return (
-    <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-6 p-6 py-10">
-      <div className="space-y-2">
-        <p className="text-sm text-gray-500">Blooclip</p>
-        <h1 className="text-2xl font-semibold">Bulk Upload</h1>
+    <aside className="flex h-screen w-72 shrink-0 flex-col border-r border-[#e0e5df] bg-[#f4f7f4] px-4 py-4">
+      <div className="flex items-center gap-3 px-2">
+        <AppMark />
+        <div>
+          <p className="text-sm font-semibold tracking-tight text-slate-950">
+            Blooclip
+          </p>
+          <p className="text-xs text-slate-500">AI tutorial studio</p>
+        </div>
       </div>
 
-      <input
-        type="file"
-        accept="video/mp4,video/webm,video/quicktime"
-        multiple
-        disabled={isUploading}
-        onChange={(event) => handleFilesSelected(event.target.files)}
-      />
+      <button
+        type="button"
+        className="mt-7 flex h-10 items-center justify-center rounded-md bg-slate-950 px-3 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800"
+      >
+        New tutorial
+      </button>
 
-      <label className="flex flex-col gap-2 text-sm">
-        <span className="font-medium">Batch title</span>
-        <input
-          value={batchTitle}
-          onChange={(event) => {
-            setBatchTitle(event.target.value);
-            setTitleTouched(true);
-          }}
-          disabled={isUploading}
-          className="rounded border border-gray-300 px-3 py-2 text-base"
-        />
-      </label>
-
-      <label className="flex flex-col gap-2 text-sm">
-        <span className="font-medium">Target language</span>
-        <select
-          value={targetLanguage}
-          onChange={(event) => setTargetLanguage(event.target.value)}
-          disabled={isUploading}
-          className="rounded border border-gray-300 bg-white px-3 py-2 text-base text-black"
-        >
-          {TARGET_LANGUAGE_OPTIONS.map((language) => (
-            <option key={language.value} value={language.value}>
-              {language.label}
-            </option>
+      <div className="mt-7">
+        <p className="px-2 text-xs font-medium uppercase tracking-[0.12em] text-slate-400">
+          Recent
+        </p>
+        <nav className="mt-3 space-y-1" aria-label="Recent tutorials">
+          {recentTutorials.map((tutorial) => (
+            <button
+              key={tutorial.title}
+              type="button"
+              className={`w-full rounded-md px-3 py-2.5 text-left transition ${
+                tutorial.active
+                  ? "bg-white shadow-sm ring-1 ring-[#dfe6df]"
+                  : "text-slate-600 hover:bg-white/70"
+              }`}
+            >
+              <span className="block truncate text-sm font-medium text-slate-900">
+                {tutorial.title}
+              </span>
+              <span className="mt-1 block text-xs text-slate-500">
+                {tutorial.meta}
+              </span>
+            </button>
           ))}
-        </select>
-      </label>
+        </nav>
+      </div>
 
-      {items.length > 0 && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between gap-4">
-            <h2 className="text-base font-semibold">
-              Videos ({items.length}/{MAX_BATCH_UPLOAD_FILES})
-            </h2>
-            <span className="text-sm text-gray-500">
-              One language, one prompt per video
+      <div className="mt-auto rounded-md border border-[#dfe6df] bg-white p-3">
+        <p className="text-sm font-medium text-slate-900">
+          No timeline editor
+        </p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          Upload source videos, describe the outcome, and let the AI generate
+          the tutorial package.
+        </p>
+      </div>
+    </aside>
+  );
+}
+
+function VideoChip({ name, detail }: { name: string; detail: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2 rounded-md border border-[#dfe6df] bg-white px-2.5 py-2">
+      <div className="flex h-9 w-12 shrink-0 items-center justify-center rounded bg-gradient-to-br from-slate-800 via-slate-700 to-teal-700">
+        <div className="h-3 w-3 rounded-full border border-white/80 bg-white/20" />
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium text-slate-900">{name}</p>
+        <p className="mt-0.5 text-xs text-slate-500">{detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function UserMessage() {
+  return (
+    <section className="flex justify-end">
+      <div className="w-full max-w-3xl rounded-md bg-[#edf7f2] p-3.5 ring-1 ring-[#cfe3d9]">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-sm font-semibold text-slate-950">
+            What should this video teach?
+          </p>
+          <span className="text-xs font-medium text-[#0f766e]">
+            3 videos attached
+          </span>
+        </div>
+        <div className="mt-3 grid gap-2 xl:grid-cols-3">
+          {sourceVideos.map((video) => (
+            <VideoChip key={video.name} {...video} />
+          ))}
+        </div>
+        <p className="mt-3 text-sm leading-6 text-slate-800">
+          Create a 3-minute onboarding tutorial for new operators. Show the
+          safest way to replace this machine filter, explain each step in plain
+          language, and include subtitles.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function AssistantMessage() {
+  return (
+    <section className="flex gap-3">
+      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-950 text-xs font-semibold text-white">
+        AI
+      </div>
+      <div className="w-full max-w-3xl">
+        <div className="rounded-md border border-[#e1e6df] bg-white p-4 shadow-sm shadow-slate-900/[0.03]">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h1 className="text-xl font-semibold tracking-tight text-slate-950">
+                Tutorial draft ready
+              </h1>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                AI will find the key steps, write voiceover, add subtitles, and
+                export the final tutorial.
+              </p>
+            </div>
+            <span className="rounded-md bg-[#dff7ec] px-2.5 py-1 text-xs font-medium text-[#0f766e]">
+              Review mode
             </span>
           </div>
 
-          <div className="space-y-3">
-            {items.map((item, index) => (
+          <div className="mt-4 grid gap-2.5">
+            {automationSteps.map((step) => (
               <div
-                key={item.id}
-                className="grid gap-3 rounded border border-gray-200 p-4"
+                key={step.title}
+                className="grid grid-cols-[auto_1fr_auto] items-start gap-3 border-t border-[#edf0ec] pt-2.5 first:border-t-0 first:pt-0"
               >
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">
-                      {index + 1}. {item.file.name}
-                    </p>
-                    <p className="text-sm text-gray-500">
-                      {formatBytes(item.file.size)} -{" "}
-                      {item.file.type || "unknown type"}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeItem(item.id)}
-                    disabled={isUploading}
-                    className="rounded border border-gray-300 px-3 py-1 text-sm disabled:opacity-40"
-                  >
-                    Remove
-                  </button>
+                <div className="mt-1 h-2.5 w-2.5 rounded-full bg-[#0f766e]" />
+                <div>
+                  <p className="text-sm font-medium text-slate-950">
+                    {step.title}
+                  </p>
+                  <p className="mt-1 text-sm leading-5 text-slate-500">
+                    {step.description}
+                  </p>
                 </div>
-
-                <label className="grid gap-2 text-sm">
-                  <span className="font-medium">Prompt for this video</span>
-                  <textarea
-                    value={item.prompt}
-                    onChange={(event) =>
-                      updatePrompt(item.id, event.target.value)
-                    }
-                    rows={3}
-                    disabled={isUploading}
-                    className="resize-y rounded border border-gray-300 px-3 py-2 text-base"
-                  />
-                </label>
-
-                <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-                  <span className="font-mono">{item.status}</span>
-                  <span className="text-gray-600">{item.message}</span>
-                </div>
-                {item.uploadProgress !== null && (
-                  <div className="grid gap-2">
-                    <div className="h-2 overflow-hidden rounded bg-gray-200">
-                      <div
-                        className="h-full rounded bg-black transition-all"
-                        style={{ width: `${item.uploadProgress}%` }}
-                      />
-                    </div>
-                    <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-gray-500">
-                      <span>
-                        {formatBytes(item.uploadedBytes)} /{" "}
-                        {formatBytes(item.file.size)}
-                      </span>
-                      <span>
-                        {formatUploadSpeed(item.uploadSpeedBytesPerSecond)}
-                      </span>
-                    </div>
-                  </div>
-                )}
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600">
+                  {step.status}
+                </span>
               </div>
             ))}
           </div>
+
+          <div className="mt-4 rounded-md bg-slate-950 px-4 py-2.5 text-sm text-white">
+            No timeline. No manual cutting. Blooclip turns the source footage
+            into a finished tutorial package automatically.
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Composer() {
+  return (
+    <div className="border-t border-[#e1e6df] bg-[#fbfcfb]/95 px-6 py-3">
+      <div className="mx-auto max-w-4xl rounded-md border border-[#dfe6df] bg-white p-3 shadow-lg shadow-slate-900/[0.04]">
+        <label htmlFor="tutorial-prompt" className="sr-only">
+          Describe the tutorial you want
+        </label>
+        <textarea
+          id="tutorial-prompt"
+          defaultValue="Describe the tutorial you want..."
+          rows={1}
+          className="block w-full resize-none border-0 bg-transparent text-sm leading-6 text-slate-700 outline-none placeholder:text-slate-400"
+        />
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-[#dfe6df] px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+            >
+              Upload videos
+            </button>
+            <label className="flex items-center gap-2 rounded-md border border-[#dfe6df] px-3 py-2 text-sm text-slate-600">
+              <span>Language</span>
+              <select
+                defaultValue={DEFAULT_TARGET_LANGUAGE}
+                className="bg-transparent text-sm font-medium text-slate-900 outline-none"
+              >
+                {TARGET_LANGUAGE_OPTIONS.map((language) => (
+                  <option key={language.value} value={language.value}>
+                    {language.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <button
+            type="button"
+            className="rounded-md bg-[#0f766e] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#0b5f59]"
+          >
+            Generate
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OutputPreview() {
+  return (
+    <aside className="hidden h-screen w-96 shrink-0 border-l border-[#e0e5df] bg-[#f8faf8] px-5 py-5 xl:flex xl:flex-col">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-950">Output</p>
+          <p className="text-xs text-slate-500">Tutorial package</p>
+        </div>
+        <span className="rounded-md bg-[#e0f7ec] px-2.5 py-1 text-xs font-medium text-[#0f766e]">
+          Ready
+        </span>
+      </div>
+
+      <div className="mt-5 overflow-hidden rounded-md border border-[#dfe6df] bg-white shadow-sm shadow-slate-900/[0.03]">
+        <div className="aspect-video bg-gradient-to-br from-slate-900 via-slate-800 to-teal-800 p-4 text-white">
+          <div className="flex h-full flex-col justify-between">
+            <div className="flex items-center justify-between text-xs text-white/70">
+              <span>Generated tutorial</span>
+              <span>3:00</span>
+            </div>
+            <div>
+              <p className="max-w-56 text-xl font-semibold leading-7">
+                Replace the filter safely
+              </p>
+              <p className="mt-2 text-sm text-white/70">
+                Voiceover and subtitles included
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-4">
+          <p className="text-sm font-semibold text-slate-950">Final video</p>
+          <p className="mt-1 text-sm leading-5 text-slate-500">
+            1080p tutorial with narrated steps, captions, and clean transitions.
+          </p>
+          <div className="mt-4 grid gap-2">
+            {deliverables.map((deliverable) => (
+              <div
+                key={deliverable}
+                className="flex items-center justify-between rounded-md border border-[#edf0ec] px-3 py-2"
+              >
+                <span className="text-sm text-slate-700">{deliverable}</span>
+                <span className="text-xs font-medium text-[#0f766e]">Ready</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5 rounded-md border border-[#dfe6df] bg-white p-4">
+        <p className="text-sm font-semibold text-slate-950">AI decisions</p>
+        <div className="mt-3 space-y-3">
+          <div>
+            <p className="text-sm font-medium text-slate-800">
+              1. Show safe shutdown
+            </p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Opens with the operator turning the machine off before touching
+              the filter.
+            </p>
+          </div>
+          <div className="border-t border-[#edf0ec] pt-3">
+            <p className="text-sm font-medium text-slate-800">
+              2. Highlight replacement motion
+            </p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              Uses the clearest close-up as non-editable evidence for the
+              generated step.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-auto grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          className="rounded-md border border-[#dfe6df] bg-white px-3 py-2 text-sm font-medium text-slate-700"
+        >
+          Instruction PDF
+        </button>
+        <button
+          type="button"
+          className="rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white"
+        >
+          Download
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+export default function Home() {
+  return (
+    <main className="h-screen overflow-hidden bg-[#f7f9f6] text-slate-950">
+      <div className="flex h-full">
+        <Sidebar />
+        <section className="flex min-w-0 flex-1 flex-col">
+          <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#e1e6df] bg-[#fbfcfb] px-6">
+            <div>
+              <p className="text-sm font-semibold text-slate-950">
+                Conversation Studio
+              </p>
+              <p className="text-xs text-slate-500">
+                Upload videos. Write what you want. AI handles everything.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="rounded-md border border-[#dfe6df] bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm"
+            >
+              Static preview
+            </button>
+          </header>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+            <div className="mx-auto flex max-w-4xl flex-col gap-5">
+              <div className="max-w-2xl">
+                <p className="text-sm font-medium text-[#0f766e]">
+                  AI-native tutorial generation
+                </p>
+                <h2 className="mt-1.5 text-3xl font-semibold tracking-tight text-slate-950">
+                  Turn raw video into a finished tutorial by asking.
+                </h2>
+                <p className="mt-2 max-w-xl text-sm leading-6 text-slate-600">
+                  Blooclip watches the source footage, chooses the teaching
+                  structure, writes the narration, adds subtitles, and prepares
+                  export files without a manual editing workflow.
+                </p>
+              </div>
+
+              <UserMessage />
+              <AssistantMessage />
+            </div>
+          </div>
+
+          <Composer />
         </section>
-      )}
-
-      <button
-        onClick={uploadBatch}
-        disabled={items.length === 0 || isUploading}
-        className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
-      >
-        {isUploading ? "Uploading..." : "Upload Batch"}
-      </button>
-
-      <p className="text-sm text-gray-600">{status}</p>
+        <OutputPreview />
+      </div>
     </main>
   );
 }
