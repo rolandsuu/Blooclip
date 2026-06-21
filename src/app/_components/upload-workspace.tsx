@@ -1,8 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChangeEvent, DragEvent, FormEvent } from "react";
-import { useRouter } from "next/navigation";
 
 import {
   DEFAULT_TARGET_LANGUAGE,
@@ -12,6 +11,10 @@ import {
   prepareClientUploadFiles,
   type PreparedClientUploadFile,
 } from "@/lib/client-upload";
+import {
+  getProcessingDisplay,
+  type ProcessingDisplayTone,
+} from "@/lib/processing-stage-copy";
 
 type RejectedUploadItem = {
   id: string;
@@ -34,6 +37,32 @@ type UploadProgressItem = {
   phase: UploadPhase;
   progress: number;
   message: string;
+};
+
+type BatchVideoStatus = {
+  id: string;
+  batchPosition: number | null;
+  filename: string | null;
+  prompt: string | null;
+  status: string;
+  progress: number;
+  currentStage: string | null;
+  errorMessage: string | null;
+  downloadReady: boolean;
+  instructionReady: boolean;
+  instructionPdfReady: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type BatchStatus = {
+  id: string;
+  title: string;
+  targetLanguage: string;
+  expectedVideoCount: number;
+  createdAt: string;
+  updatedAt: string;
+  videos: BatchVideoStatus[];
 };
 
 type UploadSessionVideo = {
@@ -59,6 +88,7 @@ const UPLOAD_ACCEPT_ATTRIBUTE =
   "video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov";
 
 const R2_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
+const BATCH_STATUS_POLL_INTERVAL_MS = 3000;
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -144,16 +174,6 @@ function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
     totalVideos: data.totalVideos,
     videos,
   };
-}
-
-function getSafeStatusUrl(session: UploadSessionResponse) {
-  const expectedStatusUrl = `/video-batches/${session.batchId}`;
-
-  if (session.statusUrl === expectedStatusUrl) {
-    return session.statusUrl;
-  }
-
-  return `/video-batches/${encodeURIComponent(session.batchId)}`;
 }
 
 async function createUploadSession(
@@ -291,6 +311,49 @@ async function completeBatchUpload(batchId: string, prompt: string) {
   }
 }
 
+async function loadBatchStatus(batchId: string) {
+  const response = await fetch(
+    `/api/video-batches/${encodeURIComponent(batchId)}`
+  );
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, "加载 AI 处理状态失败。"));
+  }
+
+  return (await response.json()) as BatchStatus;
+}
+
+function isTerminalStatus(status: string) {
+  return status === "completed" || status === "failed" || status === "canceled";
+}
+
+function getBatchCounts(batch: BatchStatus | null) {
+  const videos = batch?.videos ?? [];
+  const completedCount = videos.filter(
+    (video) => video.status === "completed"
+  ).length;
+  const failedCount = videos.filter((video) => video.status === "failed").length;
+  const activeCount = videos.filter(
+    (video) => !isTerminalStatus(video.status)
+  ).length;
+
+  return {
+    totalCount: batch?.expectedVideoCount ?? videos.length,
+    videoCount: videos.length,
+    activeCount,
+    completedCount,
+    failedCount,
+  };
+}
+
+function isBatchTerminal(batch: BatchStatus | null) {
+  if (!batch || batch.videos.length < batch.expectedVideoCount) {
+    return false;
+  }
+
+  return batch.videos.every((video) => isTerminalStatus(video.status));
+}
+
 function getPhaseLabel(phase: UploadPhase) {
   switch (phase) {
     case "creating":
@@ -332,6 +395,37 @@ function getPhaseClasses(phase: UploadPhase) {
         dot: "bg-[#e92b2b]",
         text: "text-[#c81818]",
         bar: "bg-[#e92b2b]",
+      };
+  }
+}
+
+function getProcessingListClasses(tone: ProcessingDisplayTone) {
+  switch (tone) {
+    case "success":
+      return {
+        dot: "bg-[#20a03f]",
+        text: "text-[#198a35]",
+        bar: "bg-[#20a03f]",
+      };
+    case "error":
+      return {
+        dot: "bg-[#e92b2b]",
+        text: "text-[#c81818]",
+        bar: "bg-[#e92b2b]",
+      };
+    case "canceled":
+    case "loading":
+    case "idle":
+      return {
+        dot: "bg-[#7b8493]",
+        text: "text-[#586273]",
+        bar: "bg-[#7b8493]",
+      };
+    case "active":
+      return {
+        dot: "processing-dot-pulse bg-[#11131a]",
+        text: "text-[#11131a]",
+        bar: "bg-[#11131a]",
       };
   }
 }
@@ -508,10 +602,33 @@ function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
   );
 }
 
-function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
+type UploadProgressListProps = {
+  items: UploadProgressItem[];
+  batchStatus: BatchStatus | null;
+  statusMessage: string | null;
+  downloadingVideoId: string | null;
+  downloadingInstructionPdfId: string | null;
+  onDownloadVideo(videoId: string): void;
+  onDownloadInstructionPdf(videoId: string): void;
+};
+
+function UploadProgressList({
+  items,
+  batchStatus,
+  statusMessage,
+  downloadingVideoId,
+  downloadingInstructionPdfId,
+  onDownloadVideo,
+  onDownloadInstructionPdf,
+}: UploadProgressListProps) {
   if (items.length === 0) {
     return null;
   }
+
+  const videosById = new Map(
+    (batchStatus?.videos ?? []).map((video) => [video.id, video])
+  );
+  const counts = getBatchCounts(batchStatus);
 
   return (
     <section
@@ -519,32 +636,85 @@ function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
       className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8"
     >
       <div className="mx-auto max-w-[1100px]">
-        <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
-          上传进度
-        </h2>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
+              {batchStatus ? "处理进度" : "上传进度"}
+            </h2>
+            {statusMessage && (
+              <p className="mt-1 text-sm font-medium text-[#6f7785]">
+                {statusMessage}
+              </p>
+            )}
+          </div>
+
+          {batchStatus && (
+            <div className="flex flex-wrap gap-2 text-sm font-semibold">
+              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
+                视频 {counts.videoCount}/{counts.totalCount}
+              </span>
+              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
+                进行中 {counts.activeCount}
+              </span>
+              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#198a35]">
+                已完成 {counts.completedCount}
+              </span>
+              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#c81818]">
+                失败 {counts.failedCount}
+              </span>
+            </div>
+          )}
+        </div>
 
         <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
-          <div className="hidden grid-cols-[minmax(0,1fr)_180px_210px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
+          <div className="hidden grid-cols-[minmax(0,1fr)_220px_190px_170px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
             <span>视频</span>
             <span>状态</span>
             <span>进度</span>
+            <span>操作</span>
           </div>
 
           <ul aria-live="polite">
             {items.map((item) => {
-              const tone = getPhaseClasses(item.phase);
-              const progress = Math.max(0, Math.min(100, item.progress));
+              const batchVideo = item.videoId ? videosById.get(item.videoId) : null;
+              const display = batchVideo
+                ? getProcessingDisplay({
+                    status: batchVideo.status,
+                    currentStage: batchVideo.currentStage,
+                    progress: batchVideo.progress,
+                    errorMessage: batchVideo.errorMessage,
+                  })
+                : null;
+              const tone = display
+                ? getProcessingListClasses(display.tone)
+                : getPhaseClasses(item.phase);
+              const progress = Math.max(
+                0,
+                Math.min(100, display ? display.progress : item.progress)
+              );
+              const statusTitle = display
+                ? display.title
+                : getPhaseLabel(item.phase);
+              const statusDetail =
+                batchVideo?.errorMessage ?? display?.detail ?? item.message;
+              const canDownloadVideo = Boolean(batchVideo?.downloadReady);
+              const canDownloadInstructionPdf = Boolean(
+                batchVideo?.instructionPdfReady
+              );
+              const isDownloadingVideo = batchVideo?.id === downloadingVideoId;
+              const isDownloadingInstructionPdf =
+                batchVideo?.id === downloadingInstructionPdfId;
 
               return (
                 <li
                   key={item.id}
-                  className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px_210px] md:items-center md:gap-5"
+                  className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_220px_190px_170px] md:items-center md:gap-5"
                 >
                   <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
                     <FileThumb />
                     <div className="min-w-0">
                       <p className="truncate text-sm font-bold text-[#11131a]">
-                        {item.filename}
+                        {batchVideo?.filename ?? item.filename}
                       </p>
                       <p className="mt-1 text-sm text-[#6f7785]">
                         {formatFileSize(item.size)} · {item.contentType}
@@ -556,10 +726,12 @@ function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
                     <div className="flex items-center gap-2">
                       <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
                       <span className={cx("text-sm font-semibold", tone.text)}>
-                        {getPhaseLabel(item.phase)}
+                        {statusTitle}
                       </span>
                     </div>
-                    <p className="mt-1 text-sm text-[#6f7785]">{item.message}</p>
+                    <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#6f7785]">
+                      {statusDetail}
+                    </p>
                   </div>
 
                   <div className="grid grid-cols-[44px_1fr] items-center gap-3">
@@ -572,9 +744,45 @@ function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
                           "h-full rounded-full transition-all duration-500",
                           tone.bar
                         )}
-                        style={{ width: `${item.phase === "creating" ? 0 : progress}%` }}
+                        style={{
+                          width: `${
+                            !display && item.phase === "creating" ? 0 : progress
+                          }%`,
+                        }}
                       />
                     </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 md:grid">
+                    {canDownloadVideo && batchVideo && (
+                      <button
+                        type="button"
+                        onClick={() => onDownloadVideo(batchVideo.id)}
+                        disabled={isDownloadingVideo}
+                        className="h-9 rounded-md bg-[#11131a] px-3 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:bg-[#aeb7c5]"
+                      >
+                        {isDownloadingVideo ? "准备中..." : "下载最终视频"}
+                      </button>
+                    )}
+
+                    {canDownloadInstructionPdf && batchVideo && (
+                      <button
+                        type="button"
+                        onClick={() => onDownloadInstructionPdf(batchVideo.id)}
+                        disabled={isDownloadingInstructionPdf}
+                        className="h-9 rounded-md border border-[#c5ccd8] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:border-[#11131a] disabled:cursor-not-allowed disabled:text-[#8a93a3]"
+                      >
+                        {isDownloadingInstructionPdf
+                          ? "准备中..."
+                          : "下载操作 PDF"}
+                      </button>
+                    )}
+
+                    {!canDownloadVideo && !canDownloadInstructionPdf && (
+                      <span className="text-sm font-medium text-[#8a93a3]">
+                        等待结果
+                      </span>
+                    )}
                   </div>
                 </li>
               );
@@ -587,7 +795,6 @@ function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
 }
 
 export function UploadWorkspace() {
-  const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [targetLanguage, setTargetLanguage] = useState<string>(
     DEFAULT_TARGET_LANGUAGE
@@ -595,7 +802,17 @@ export function UploadWorkspace() {
   const [selectedUploads, setSelectedUploads] = useState<UploadSelection[]>([]);
   const [rejectedItems, setRejectedItems] = useState<RejectedUploadItem[]>([]);
   const [uploadItems, setUploadItems] = useState<UploadProgressItem[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [batchStatus, setBatchStatus] = useState<BatchStatus | null>(null);
+  const [batchStatusMessage, setBatchStatusMessage] = useState<string | null>(
+    null
+  );
   const [formError, setFormError] = useState<string | null>(null);
+  const [downloadingVideoId, setDownloadingVideoId] = useState<string | null>(
+    null
+  );
+  const [downloadingInstructionPdfId, setDownloadingInstructionPdfId] =
+    useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -605,6 +822,67 @@ export function UploadWorkspace() {
   );
   const canGenerate =
     selectedUploads.length > 0 && prompt.trim().length > 0 && !isSubmitting;
+
+  useEffect(() => {
+    if (!activeBatchId) {
+      return;
+    }
+
+    const batchId = activeBatchId;
+    let active = true;
+    let intervalId: number | null = null;
+
+    async function refreshBatchStatus() {
+      try {
+        const nextBatchStatus = await loadBatchStatus(batchId);
+
+        if (!active) {
+          return;
+        }
+
+        setBatchStatus(nextBatchStatus);
+
+        if (isBatchTerminal(nextBatchStatus)) {
+          const counts = getBatchCounts(nextBatchStatus);
+
+          setBatchStatusMessage(
+            counts.failedCount > 0
+              ? "处理结束，有视频失败。"
+              : "处理完成，可以下载结果。"
+          );
+          setIsSubmitting(false);
+
+          if (intervalId !== null) {
+            window.clearInterval(intervalId);
+          }
+
+          return;
+        }
+
+        setBatchStatusMessage("AI 处理状态已更新。");
+      } catch (error) {
+        if (active) {
+          setBatchStatusMessage(
+            getErrorMessage(error, "加载 AI 处理状态失败。")
+          );
+        }
+      }
+    }
+
+    refreshBatchStatus();
+    intervalId = window.setInterval(
+      refreshBatchStatus,
+      BATCH_STATUS_POLL_INTERVAL_MS
+    );
+
+    return () => {
+      active = false;
+
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [activeBatchId]);
 
   function updateUploadItem(
     id: string,
@@ -641,7 +919,12 @@ export function UploadWorkspace() {
     setSelectedUploads(nextSelections);
     setRejectedItems(nextRejectedItems);
     setUploadItems([]);
+    setActiveBatchId(null);
+    setBatchStatus(null);
+    setBatchStatusMessage(null);
     setFormError(null);
+    setDownloadingVideoId(null);
+    setDownloadingInstructionPdfId(null);
   }
 
   function chooseVideos(event: ChangeEvent<HTMLInputElement>) {
@@ -738,6 +1021,74 @@ export function UploadWorkspace() {
     }
   }
 
+  async function downloadVideo(videoId: string) {
+    if (downloadingVideoId) {
+      return;
+    }
+
+    setDownloadingVideoId(videoId);
+
+    try {
+      const response = await fetch(
+        `/api/videos/${encodeURIComponent(videoId)}/download-url`
+      );
+
+      if (!response.ok) {
+        setBatchStatusMessage(
+          await readErrorMessage(response, "下载视频失败。")
+        );
+        return;
+      }
+
+      const data = (await response.json()) as { downloadUrl?: unknown };
+
+      if (typeof data.downloadUrl !== "string") {
+        setBatchStatusMessage("下载链接响应无效。");
+        return;
+      }
+
+      window.location.href = data.downloadUrl;
+    } catch {
+      setBatchStatusMessage("下载失败，请稍后重试。");
+    } finally {
+      setDownloadingVideoId(null);
+    }
+  }
+
+  async function downloadInstructionPdf(videoId: string) {
+    if (downloadingInstructionPdfId) {
+      return;
+    }
+
+    setDownloadingInstructionPdfId(videoId);
+
+    try {
+      const response = await fetch(
+        `/api/videos/${encodeURIComponent(videoId)}/instruction-document`
+      );
+
+      if (!response.ok) {
+        setBatchStatusMessage(
+          await readErrorMessage(response, "下载操作 PDF 失败。")
+        );
+        return;
+      }
+
+      const data = (await response.json()) as { pdfDownloadUrl?: unknown };
+
+      if (typeof data.pdfDownloadUrl !== "string") {
+        setBatchStatusMessage("操作 PDF 响应无效。");
+        return;
+      }
+
+      window.location.href = data.pdfDownloadUrl;
+    } catch {
+      setBatchStatusMessage("操作 PDF 下载失败，请稍后重试。");
+    } finally {
+      setDownloadingInstructionPdfId(null);
+    }
+  }
+
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -750,6 +1101,9 @@ export function UploadWorkspace() {
 
     setIsSubmitting(true);
     setFormError(null);
+    setActiveBatchId(null);
+    setBatchStatus(null);
+    setBatchStatusMessage(null);
     setRejectedItems([]);
     setUploadItems(
       uploads.map((selection) => ({
@@ -804,7 +1158,9 @@ export function UploadWorkspace() {
       );
 
       await completeBatchUpload(session.batchId, trimmedPrompt);
-      router.push(getSafeStatusUrl(session));
+      setActiveBatchId(session.batchId);
+      setBatchStatusMessage("AI 处理已启动。");
+      setSelectedUploads([]);
     } catch (error) {
       setFormError(getErrorMessage(error));
       setIsSubmitting(false);
@@ -961,7 +1317,15 @@ export function UploadWorkspace() {
         </form>
       </section>
 
-      <UploadProgressList items={uploadItems} />
+      <UploadProgressList
+        items={uploadItems}
+        batchStatus={batchStatus}
+        statusMessage={batchStatusMessage}
+        downloadingVideoId={downloadingVideoId}
+        downloadingInstructionPdfId={downloadingInstructionPdfId}
+        onDownloadVideo={downloadVideo}
+        onDownloadInstructionPdf={downloadInstructionPdf}
+      />
     </main>
   );
 }
