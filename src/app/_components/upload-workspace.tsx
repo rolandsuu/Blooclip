@@ -290,25 +290,6 @@ function downloadFromUrl(url: string, filename: string) {
   link.remove();
 }
 
-function UploadIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2.4"
-      aria-hidden="true"
-    >
-      <path d="M12 16V4" />
-      <path d="m7 9 5-5 5 5" />
-      <path d="M5 16v3h14v-3" />
-    </svg>
-  );
-}
-
 function DownloadIcon({ className }: { className?: string }) {
   return (
     <svg
@@ -754,7 +735,6 @@ export function UploadWorkspace() {
   const [rejectedItems, setRejectedItems] = useState<RejectedUploadItem[]>([]);
   const [jobs, setJobs] = useState<MockJob[]>([]);
   const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedUrlsRef = useRef<string[]>([]);
   const allObjectUrlsRef = useRef<string[]>([]);
 
@@ -1001,24 +981,6 @@ export function UploadWorkspace() {
           <h1 className="text-center text-3xl font-bold tracking-tight text-[#11131a] sm:text-4xl">
             Upload your video
           </h1>
-
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept={UPLOAD_ACCEPT_ATTRIBUTE}
-            onChange={chooseVideos}
-            className="hidden"
-          />
-
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="inline-flex h-[70px] items-center justify-center gap-4 rounded-lg bg-[#ee2b2f] px-6 text-xl font-bold text-white shadow-lg shadow-red-600/20 transition hover:bg-[#d92327] focus:outline-none focus:ring-4 focus:ring-[#ee2b2f]/25"
-          >
-            <UploadIcon className="h-8 w-8" />
-            Choose video file
-          </button>
 
           <label
             onDragEnter={handleDragEnter}
