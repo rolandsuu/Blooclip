@@ -14,11 +14,11 @@ export function getTargetLanguageCode(targetLanguage: string) {
   if (
     normalized === "en" ||
     normalized.startsWith("en-") ||
-    normalized === "english"
+    normalized === "english" ||
+    trimmed === "英语"
   ) {
     return "en";
   }
 
   return /^[a-z]{2}$/.test(normalized) ? normalized : null;
 }
-

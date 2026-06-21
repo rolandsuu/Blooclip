@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 
 import { getAuthenticatedUser, getSafeNextPath } from "@/lib/auth";
+import { isAuthDisabled } from "@/lib/dev-auth";
 import { getRequestOrigin } from "@/lib/site-url";
 import { createSupabaseServerClient } from "@/lib/supabase-server";
 
@@ -25,8 +26,12 @@ async function sendMagicLink(formData: FormData) {
     .toLowerCase();
   const next = getSafeNextPath(formData.get("next"));
 
+  if (isAuthDisabled()) {
+    redirect(next);
+  }
+
   if (!email) {
-    redirect(`/login?error=Email is required&next=${encodeURIComponent(next)}`);
+    redirect(`/login?error=email_required&next=${encodeURIComponent(next)}`);
   }
 
   const origin = await getRequestOrigin();
@@ -41,11 +46,7 @@ async function sendMagicLink(formData: FormData) {
   });
 
   if (error) {
-    redirect(
-      `/login?error=${encodeURIComponent(
-        error.message
-      )}&next=${encodeURIComponent(next)}`
-    );
+    redirect(`/login?error=send_failed&next=${encodeURIComponent(next)}`);
   }
 
   redirect(
@@ -66,7 +67,13 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
   const sent = firstParam(params.sent) === "1";
   const email = firstParam(params.email);
-  const error = firstParam(params.error);
+  const errorCode = firstParam(params.error);
+  const error =
+    errorCode === "email_required"
+      ? "请输入邮箱地址。"
+      : errorCode
+        ? "登录链接发送失败，请稍后重试。"
+        : null;
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-white px-4 text-black">
@@ -77,10 +84,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">
-              Sign in to Blooclip
+              登录 Blooclip
             </h1>
             <p className="mt-2 text-sm leading-6 text-black/55">
-              Use your email to keep video jobs and reopen them later.
+              使用邮箱保存视频任务，之后可以继续查看。
             </p>
           </div>
         </div>
@@ -88,7 +95,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         <form action={sendMagicLink} className="space-y-3">
           <input type="hidden" name="next" value={next} />
           <label htmlFor="email" className="sr-only">
-            Email
+            邮箱
           </label>
           <input
             id="email"
@@ -102,13 +109,13 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             type="submit"
             className="h-11 w-full rounded-md bg-black px-4 text-sm font-semibold text-white transition hover:bg-black/80"
           >
-            Send sign-in link
+            发送登录链接
           </button>
         </form>
 
         {sent && (
           <p className="rounded-md border border-black/10 bg-black/[0.025] p-3 text-sm leading-6 text-black/65">
-            Check {email ?? "your inbox"} for a Blooclip sign-in link.
+            请打开 {email ?? "你的邮箱"} 查看 Blooclip 登录链接。
           </p>
         )}
 

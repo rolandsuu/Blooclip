@@ -40,7 +40,7 @@ test("prepareClientUploadFiles rejects unsupported video types", () => {
 
   assert.equal(result.accepted.length, 0);
   assert.deepEqual(result.rejected.map((upload) => upload.error), [
-    "Unsupported video type. Use MP4, WebM, or MOV.",
+    "不支持的视频格式。请使用 MP4、WebM 或 MOV。",
   ]);
 });
 
@@ -51,7 +51,7 @@ test("prepareClientUploadFiles enforces the ten-file upload limit", () => {
 
   assert.equal(result.accepted.length, 0);
   assert.equal(result.rejected.length, 11);
-  assert.equal(result.rejected[0].error, "Choose 10 videos or fewer.");
+  assert.equal(result.rejected[0].error, "最多选择 10 个视频。");
 });
 
 test("prepareClientUploadFiles rejects empty files", () => {
@@ -59,7 +59,7 @@ test("prepareClientUploadFiles rejects empty files", () => {
 
   assert.equal(result.accepted.length, 0);
   assert.deepEqual(result.rejected.map((upload) => upload.error), [
-    "Video file is empty.",
+    "视频文件为空。",
   ]);
 });
 

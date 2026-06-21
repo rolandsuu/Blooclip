@@ -70,7 +70,7 @@ function getToneClasses(tone: ProcessingDisplayTone) {
 }
 
 export function ProcessingBoard({
-  label = "AI processing",
+  label = "AI 处理中",
   className,
   compact = false,
   ...input
@@ -146,7 +146,7 @@ export function ProcessingBoard({
             </span>
           </div>
           <p className="mt-1 text-sm leading-6 text-black/60">
-            Blooclip shows the current task as it changes.
+            Blooclip 会实时显示当前任务。
           </p>
         </div>
       </div>
@@ -177,7 +177,7 @@ export function ProcessingBoard({
 
       <div className="mt-4 grid gap-2">
         <div className="flex items-center justify-between gap-3 text-xs font-medium text-black/50">
-          <span>Progress</span>
+          <span>进度</span>
           <span className="font-mono">{display.progress}%</span>
         </div>
         <div className="h-2 overflow-hidden rounded-full bg-black/10">

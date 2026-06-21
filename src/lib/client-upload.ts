@@ -68,8 +68,8 @@ export function prepareClientUploadFiles<TFile extends ClientUploadFileLike>(
       accepted: [],
       rejected: files.map((file) => ({
         file,
-        filename: file.name.trim() || "Untitled video",
-        error: `Choose ${MAX_BATCH_UPLOAD_FILES} videos or fewer.`,
+        filename: file.name.trim() || "未命名视频",
+        error: `最多选择 ${MAX_BATCH_UPLOAD_FILES} 个视频。`,
       })),
     };
   }
@@ -82,8 +82,8 @@ export function prepareClientUploadFiles<TFile extends ClientUploadFileLike>(
       if (!filename) {
         result.rejected.push({
           file,
-          filename: "Untitled video",
-          error: "Filename is required.",
+          filename: "未命名视频",
+          error: "文件名不能为空。",
         });
         return result;
       }
@@ -92,7 +92,7 @@ export function prepareClientUploadFiles<TFile extends ClientUploadFileLike>(
         result.rejected.push({
           file,
           filename,
-          error: "Unsupported video type. Use MP4, WebM, or MOV.",
+          error: "不支持的视频格式。请使用 MP4、WebM 或 MOV。",
         });
         return result;
       }
@@ -105,7 +105,7 @@ export function prepareClientUploadFiles<TFile extends ClientUploadFileLike>(
         result.rejected.push({
           file,
           filename,
-          error: "Video file is empty.",
+          error: "视频文件为空。",
         });
         return result;
       }

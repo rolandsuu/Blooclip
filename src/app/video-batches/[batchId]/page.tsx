@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 
 import { ProcessingBoard } from "@/app/_components/processing-board";
+import { getTargetLanguageLabel } from "@/lib/languages";
 import type { ProcessingDisplayInput } from "@/lib/processing-stage-copy";
 
 type BatchVideoStatus = {
@@ -34,22 +35,7 @@ type BatchStatus = {
 };
 
 async function readErrorMessage(response: Response, fallback: string) {
-  const text = await response.text().catch(() => "");
-
-  if (!text) {
-    return fallback;
-  }
-
-  try {
-    const data = JSON.parse(text) as { error?: unknown };
-
-    if (typeof data.error === "string" && data.error.trim()) {
-      return data.error;
-    }
-  } catch {
-    return text;
-  }
-
+  await response.text().catch(() => "");
   return fallback;
 }
 
@@ -68,10 +54,6 @@ function getProgress(batch: BatchStatus | null) {
 
 function isTerminalStatus(status: string) {
   return status === "completed" || status === "failed";
-}
-
-function pluralizeVideo(count: number) {
-  return count === 1 ? "video" : "videos";
 }
 
 function getBatchProcessingInput(
@@ -108,7 +90,7 @@ function getBatchProcessingInput(
       status: "failed",
       currentStage: "failed",
       progress,
-      errorMessage: `${failedCount} ${pluralizeVideo(failedCount)} failed.`,
+      errorMessage: `${failedCount} 个视频处理失败。`,
     };
   }
 
@@ -133,7 +115,7 @@ function getBatchProcessingInput(
 export default function BatchPage() {
   const params = useParams<{ batchId: string }>();
   const [batch, setBatch] = useState<BatchStatus | null>(null);
-  const [message, setMessage] = useState("Loading batch status...");
+  const [message, setMessage] = useState("正在加载批量状态...");
 
   useEffect(() => {
     let active = true;
@@ -145,7 +127,7 @@ export default function BatchPage() {
         if (!response.ok) {
           const error = await readErrorMessage(
             response,
-            "Failed to load batch status"
+            "加载批量状态失败。"
           );
 
           if (active) {
@@ -159,11 +141,11 @@ export default function BatchPage() {
 
         if (active) {
           setBatch(data);
-          setMessage("Batch status loaded");
+          setMessage("批量状态已更新。");
         }
-      } catch (error) {
+      } catch {
         if (active) {
-          setMessage(error instanceof Error ? error.message : "Load failed");
+          setMessage("加载失败，请稍后重试。");
         }
       }
     }
@@ -199,37 +181,37 @@ export default function BatchPage() {
       <div className="space-y-2">
         <p className="text-sm text-gray-500">Blooclip</p>
         <h1 className="text-2xl font-semibold">
-          {batch?.title ?? "Video Batch"}
+          {batch?.title ?? "视频批次"}
         </h1>
         <p className="text-sm text-gray-500">
-          Target language: {batch?.targetLanguage ?? "loading"}
+          目标语言：{batch ? getTargetLanguageLabel(batch.targetLanguage) : "加载中"}
         </p>
       </div>
 
       <section className="space-y-3">
         <div className="grid gap-3 sm:grid-cols-4">
           <div className="rounded border border-gray-200 p-3">
-            <p className="text-sm text-gray-500">Videos</p>
+            <p className="text-sm text-gray-500">视频</p>
             <p className="text-xl font-semibold">
               {batch?.videos.length ?? 0}/{batch?.expectedVideoCount ?? 0}
             </p>
           </div>
           <div className="rounded border border-gray-200 p-3">
-            <p className="text-sm text-gray-500">Active</p>
+            <p className="text-sm text-gray-500">进行中</p>
             <p className="text-xl font-semibold">{queuedOrActiveCount}</p>
           </div>
           <div className="rounded border border-gray-200 p-3">
-            <p className="text-sm text-gray-500">Completed</p>
+            <p className="text-sm text-gray-500">已完成</p>
             <p className="text-xl font-semibold">{completedCount}</p>
           </div>
           <div className="rounded border border-gray-200 p-3">
-            <p className="text-sm text-gray-500">Failed</p>
+            <p className="text-sm text-gray-500">失败</p>
             <p className="text-xl font-semibold">{failedCount}</p>
           </div>
         </div>
 
         <ProcessingBoard
-          label="Batch AI processing"
+          label="批量 AI 处理"
           status={batchProcessingInput.status}
           currentStage={batchProcessingInput.currentStage}
           progress={batchProcessingInput.progress}
@@ -238,7 +220,7 @@ export default function BatchPage() {
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-base font-semibold">Videos</h2>
+        <h2 className="text-base font-semibold">视频列表</h2>
 
         <div className="space-y-3">
           {(batch?.videos ?? []).map((video, index) => {
@@ -251,19 +233,19 @@ export default function BatchPage() {
                   <div className="min-w-0">
                     <p className="truncate font-medium">
                       {(video.batchPosition ?? index) + 1}.{" "}
-                      {video.filename ?? "Untitled video"}
+                      {video.filename ?? "未命名视频"}
                     </p>
                   </div>
                   <Link
                     href={`/videos/${video.id}`}
                     className="rounded border border-gray-300 px-3 py-1 text-sm"
                   >
-                    Open
+                    打开
                   </Link>
                 </div>
 
                 <p className="text-sm text-gray-700">
-                  {video.prompt ?? "No prompt"}
+                  {video.prompt ?? "没有提示词"}
                 </p>
 
                 <ProcessingBoard

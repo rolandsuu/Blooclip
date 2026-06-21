@@ -11,6 +11,10 @@ export function isAuthDisabledForDev() {
   );
 }
 
+export function isAuthDisabled() {
+  return process.env.AUTH_DISABLED === "true" || isAuthDisabledForDev();
+}
+
 export function createDevBypassUser(): DevBypassUser {
   return {
     id: "local-dev",

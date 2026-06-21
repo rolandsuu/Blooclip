@@ -18,29 +18,14 @@ type VideoStatus = {
 };
 
 async function readErrorMessage(response: Response, fallback: string) {
-  const text = await response.text().catch(() => "");
-
-  if (!text) {
-    return fallback;
-  }
-
-  try {
-    const data = JSON.parse(text) as { error?: unknown };
-
-    if (typeof data.error === "string" && data.error.trim()) {
-      return data.error;
-    }
-  } catch {
-    return text;
-  }
-
+  await response.text().catch(() => "");
   return fallback;
 }
 
 export default function VideoPage() {
   const params = useParams<{ videoId: string }>();
   const [video, setVideo] = useState<VideoStatus | null>(null);
-  const [message, setMessage] = useState("Loading video status...");
+  const [message, setMessage] = useState("正在加载视频状态...");
   const [isDownloading, setIsDownloading] = useState(false);
   const [isDownloadingInstructionPdf, setIsDownloadingInstructionPdf] =
     useState(false);
@@ -55,7 +40,7 @@ export default function VideoPage() {
         if (!response.ok) {
           const error = await readErrorMessage(
             response,
-            "Failed to load video status"
+            "加载视频状态失败。"
           );
 
           if (active) {
@@ -69,11 +54,11 @@ export default function VideoPage() {
 
         if (active) {
           setVideo(data);
-          setMessage("Video status loaded");
+          setMessage("视频状态已更新。");
         }
-      } catch (error) {
+      } catch {
         if (active) {
-          setMessage(error instanceof Error ? error.message : "Load failed");
+          setMessage("加载失败，请稍后重试。");
         }
       }
     }
@@ -96,20 +81,20 @@ export default function VideoPage() {
       const response = await fetch(`/api/videos/${params.videoId}/download-url`);
 
       if (!response.ok) {
-        setMessage(await readErrorMessage(response, "Failed to download video"));
+        setMessage(await readErrorMessage(response, "下载视频失败。"));
         return;
       }
 
       const data = (await response.json()) as { downloadUrl?: unknown };
 
       if (typeof data.downloadUrl !== "string") {
-        setMessage("Download URL response was invalid");
+        setMessage("下载链接响应无效。");
         return;
       }
 
       window.location.href = data.downloadUrl;
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Download failed");
+    } catch {
+      setMessage("下载失败，请稍后重试。");
     } finally {
       setIsDownloading(false);
     }
@@ -129,7 +114,7 @@ export default function VideoPage() {
         setMessage(
           await readErrorMessage(
             response,
-            "Failed to download instruction PDF"
+            "下载操作 PDF 失败。"
           )
         );
         return;
@@ -138,15 +123,13 @@ export default function VideoPage() {
       const data = (await response.json()) as { pdfDownloadUrl?: unknown };
 
       if (typeof data.pdfDownloadUrl !== "string") {
-        setMessage("Instruction PDF response was invalid");
+        setMessage("操作 PDF 响应无效。");
         return;
       }
 
       window.location.href = data.pdfDownloadUrl;
-    } catch (error) {
-      setMessage(
-        error instanceof Error ? error.message : "Instruction PDF download failed"
-      );
+    } catch {
+      setMessage("操作 PDF 下载失败，请稍后重试。");
     } finally {
       setIsDownloadingInstructionPdf(false);
     }
@@ -163,7 +146,7 @@ export default function VideoPage() {
     <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center gap-6 p-6">
       <div className="space-y-2">
         <p className="text-sm text-gray-500">Blooclip</p>
-        <h1 className="text-2xl font-semibold">Video Status</h1>
+        <h1 className="text-2xl font-semibold">视频状态</h1>
       </div>
 
       <ProcessingBoard
@@ -178,7 +161,7 @@ export default function VideoPage() {
         disabled={!canDownload}
         className="rounded bg-black px-4 py-2 text-white disabled:opacity-40"
       >
-        {isDownloading ? "Preparing Download..." : "Download Final Video"}
+        {isDownloading ? "正在准备下载..." : "下载最终视频"}
       </button>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -187,14 +170,14 @@ export default function VideoPage() {
             href={`/videos/${params.videoId}/instructions`}
             className="rounded border border-gray-300 px-4 py-2 text-center text-sm font-medium"
           >
-            View instruction document
+            查看操作文档
           </Link>
         ) : (
           <button
             disabled
             className="rounded border border-gray-300 px-4 py-2 text-sm font-medium opacity-40"
           >
-            View instruction document
+            查看操作文档
           </button>
         )}
 
@@ -204,8 +187,8 @@ export default function VideoPage() {
           className="rounded border border-gray-300 px-4 py-2 text-sm font-medium disabled:opacity-40"
         >
           {isDownloadingInstructionPdf
-            ? "Preparing PDF..."
-            : "Download instruction PDF"}
+            ? "正在准备 PDF..."
+            : "下载操作 PDF"}
         </button>
       </div>
 

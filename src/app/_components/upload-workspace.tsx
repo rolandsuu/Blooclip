@@ -76,33 +76,18 @@ function getUploadItemId(file: File, index: number) {
   return `${file.name}-${file.size}-${file.lastModified}-${index}`;
 }
 
-function getErrorMessage(error: unknown, fallback = "Upload failed") {
+function getErrorMessage(error: unknown, fallback = "操作失败，请稍后重试。") {
   return error instanceof Error ? error.message : fallback;
 }
 
 async function readErrorMessage(response: Response, fallback: string) {
-  const text = await response.text().catch(() => "");
-
-  if (!text) {
-    return fallback;
-  }
-
-  try {
-    const data = JSON.parse(text) as { error?: unknown };
-
-    if (typeof data.error === "string" && data.error.trim()) {
-      return data.error;
-    }
-  } catch {
-    return text;
-  }
-
+  await response.text().catch(() => "");
   return fallback;
 }
 
 function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
   if (typeof value !== "object" || value === null) {
-    throw new Error("Create upload response was invalid");
+    throw new Error("创建上传响应无效。");
   }
 
   const data = value as {
@@ -118,12 +103,12 @@ function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
     typeof data.totalVideos !== "number" ||
     !Array.isArray(data.videos)
   ) {
-    throw new Error("Create upload response was invalid");
+    throw new Error("创建上传响应无效。");
   }
 
   const videos = data.videos.map((video) => {
     if (typeof video !== "object" || video === null) {
-      throw new Error("Create upload response included an invalid video");
+      throw new Error("创建上传响应包含无效视频。");
     }
 
     const upload = video as {
@@ -142,7 +127,7 @@ function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
         upload.batchPosition === null
       )
     ) {
-      throw new Error("Create upload response included an invalid video");
+      throw new Error("创建上传响应包含无效视频。");
     }
 
     return {
@@ -194,14 +179,14 @@ async function createUploadSession(
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, "Failed to create upload session")
+      await readErrorMessage(response, "创建上传任务失败。")
     );
   }
 
   const session = parseUploadSessionResponse(await response.json());
 
   if (session.videos.length !== selectedUploads.length) {
-    throw new Error("Create upload response did not match selected videos");
+    throw new Error("创建上传响应和已选择视频不匹配。");
   }
 
   return session;
@@ -244,28 +229,24 @@ function uploadFileToR2({
       }
 
       reject(
-        new Error(
-          xhr.statusText
-            ? `R2 upload failed with status ${xhr.status}: ${xhr.statusText}`
-            : `R2 upload failed with status ${xhr.status}`
-        )
+        new Error(`存储上传失败，状态码 ${xhr.status}。`)
       );
     };
 
     xhr.onerror = () => {
-      reject(new Error("Network error while uploading to R2"));
+      reject(new Error("上传到存储时网络错误。"));
     };
 
     xhr.ontimeout = () => {
       reject(
         new Error(
-          "Upload to R2 timed out. Try a smaller file or a faster connection."
+          "上传到存储超时。请换小一点的视频，或使用更快的网络后重试。"
         )
       );
     };
 
     xhr.onabort = () => {
-      reject(new Error("Upload to R2 was canceled"));
+      reject(new Error("上传已取消。"));
     };
 
     xhr.send(file);
@@ -286,7 +267,7 @@ async function markUploadFailed(videoId: string, error: string) {
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, "Failed to mark upload failed")
+      await readErrorMessage(response, "记录上传失败状态失败。")
     );
   }
 }
@@ -305,7 +286,7 @@ async function completeBatchUpload(batchId: string, prompt: string) {
 
   if (!response.ok) {
     throw new Error(
-      await readErrorMessage(response, "Failed to start AI processing")
+      await readErrorMessage(response, "启动 AI 处理失败。")
     );
   }
 }
@@ -313,15 +294,15 @@ async function completeBatchUpload(batchId: string, prompt: string) {
 function getPhaseLabel(phase: UploadPhase) {
   switch (phase) {
     case "creating":
-      return "Creating";
+      return "创建中";
     case "uploading":
-      return "Uploading";
+      return "上传中";
     case "uploaded":
-      return "Uploaded";
+      return "已上传";
     case "queueing":
-      return "Queueing";
+      return "排队中";
     case "failed":
-      return "Failed";
+      return "失败";
   }
 }
 
@@ -357,18 +338,18 @@ function getPhaseClasses(phase: UploadPhase) {
 
 function getSubmitLabel(uploadItems: UploadProgressItem[]) {
   if (uploadItems.some((item) => item.phase === "creating")) {
-    return "Creating upload...";
+    return "正在创建上传...";
   }
 
   if (uploadItems.some((item) => item.phase === "uploading")) {
-    return "Uploading...";
+    return "正在上传...";
   }
 
   if (uploadItems.some((item) => item.phase === "queueing")) {
-    return "Starting AI processing...";
+    return "正在启动 AI 处理...";
   }
 
-  return "Working...";
+  return "处理中...";
 }
 
 function GlobeIcon({ className }: { className?: string }) {
@@ -501,7 +482,7 @@ function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
   return (
     <div className="rounded-lg border border-[#cfd5df] bg-white px-4 py-3 text-left">
       <p className="text-sm font-semibold text-[#11131a]">
-        {selections.length} video{selections.length === 1 ? "" : "s"} selected
+        已选择 {selections.length} 个视频
       </p>
       <div className="mt-3 grid gap-2">
         {selections.map((selection) => (
@@ -539,14 +520,14 @@ function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
     >
       <div className="mx-auto max-w-[1100px]">
         <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
-          Upload progress
+          上传进度
         </h2>
 
         <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
           <div className="hidden grid-cols-[minmax(0,1fr)_180px_210px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
-            <span>Video</span>
-            <span>Status</span>
-            <span>Progress</span>
+            <span>视频</span>
+            <span>状态</span>
+            <span>进度</span>
           </div>
 
           <ul aria-live="polite">
@@ -707,7 +688,7 @@ export function UploadWorkspace() {
       videoId: upload.videoId,
       phase: "uploading",
       progress: 0,
-      message: "Uploading to storage",
+      message: "正在上传到存储",
     });
 
     try {
@@ -718,14 +699,14 @@ export function UploadWorkspace() {
         onProgress: (progress) =>
           updateUploadItem(selection.id, {
             progress,
-            message: progress >= 100 ? "Upload finished" : "Uploading to storage",
+            message: progress >= 100 ? "上传完成" : "正在上传到存储",
           }),
       });
 
       updateUploadItem(selection.id, {
         phase: "uploaded",
         progress: 100,
-        message: "Upload finished",
+        message: "上传完成",
       });
 
       return {
@@ -733,14 +714,14 @@ export function UploadWorkspace() {
         selectionId: selection.id,
       };
     } catch (error) {
-      let message = getErrorMessage(error, "Upload to R2 failed");
+      let message = getErrorMessage(error, "上传到存储失败。");
 
       try {
         await markUploadFailed(upload.videoId, message);
       } catch (markError) {
-        message = `${message}. ${getErrorMessage(
+        message = `${message} ${getErrorMessage(
           markError,
-          "Failed to mark upload failed"
+          "记录上传失败状态失败。"
         )}`;
       }
 
@@ -779,7 +760,7 @@ export function UploadWorkspace() {
         size: selection.size,
         phase: "creating",
         progress: 0,
-        message: "Preparing upload URL",
+        message: "正在准备上传链接",
       }))
     );
 
@@ -816,7 +797,7 @@ export function UploadWorkspace() {
                 ...item,
                 phase: "queueing",
                 progress: 100,
-                message: "Starting AI processing",
+                message: "正在启动 AI 处理",
               }
             : item
         )
@@ -842,7 +823,7 @@ export function UploadWorkspace() {
               </p>
               <span className="hidden h-7 w-px bg-[#d5dbe5] sm:block" />
               <p className="hidden text-base font-medium text-[#586273] sm:block">
-                AI video editor
+                AI 视频剪辑工具
               </p>
             </div>
           </div>
@@ -852,19 +833,19 @@ export function UploadWorkspace() {
               href="#upload-progress"
               className="hidden text-sm font-semibold text-[#11131a] transition hover:text-[#ee2b2f] sm:inline"
             >
-              Upload progress
+              上传进度
             </a>
             <button
               type="button"
               className="flex h-9 w-9 items-center justify-center rounded-full border border-[#aeb7c5] text-[#586273] transition hover:border-[#11131a] hover:text-[#11131a]"
-              aria-label="Help"
+              aria-label="帮助"
             >
               <HelpIcon className="h-5 w-5" />
             </button>
             <button
               type="button"
               className="flex h-9 w-9 items-center justify-center rounded-full border border-[#aeb7c5] text-[#586273] transition hover:border-[#11131a] hover:text-[#11131a]"
-              aria-label="Account"
+              aria-label="账户"
             >
               <UserIcon className="h-5 w-5" />
             </button>
@@ -878,7 +859,7 @@ export function UploadWorkspace() {
           className="mx-auto grid w-full max-w-[560px] gap-4"
         >
           <h1 className="text-center text-3xl font-bold tracking-tight text-[#11131a] sm:text-4xl">
-            Upload your video
+            上传视频
           </h1>
 
           <label
@@ -903,14 +884,14 @@ export function UploadWorkspace() {
               disabled={isSubmitting}
               className="sr-only"
             />
-            Drop video here
+            将视频拖到这里
           </label>
 
           <SelectedFiles selections={selectedUploads} />
 
           {selectedUploads.length > 0 && (
             <p className="text-center text-sm font-medium text-[#586273]">
-              Selected total: {formatFileSize(selectedTotalSize)}
+              已选择总大小：{formatFileSize(selectedTotalSize)}
             </p>
           )}
 
@@ -930,7 +911,7 @@ export function UploadWorkspace() {
               htmlFor="prompt"
               className="text-base font-bold text-[#11131a]"
             >
-              Prompt
+              提示词
             </label>
             <textarea
               id="prompt"
@@ -939,7 +920,7 @@ export function UploadWorkspace() {
               rows={4}
               required
               disabled={isSubmitting}
-              placeholder="Describe what you want Blooclip to create..."
+              placeholder="描述你希望 Blooclip 生成什么内容..."
               className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5 disabled:cursor-not-allowed disabled:bg-[#eef1f6] disabled:text-[#6f7785]"
             />
           </div>
@@ -949,7 +930,7 @@ export function UploadWorkspace() {
               htmlFor="target-language"
               className="text-base font-bold text-[#11131a]"
             >
-              Target language
+              目标语言
             </label>
             <div className="relative">
               <GlobeIcon className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#586273]" />
@@ -975,7 +956,7 @@ export function UploadWorkspace() {
             disabled={!canGenerate}
             className="mt-1 h-[52px] rounded-lg bg-[#090a0d] px-6 text-base font-bold text-white shadow-sm shadow-black/20 transition hover:bg-black focus:outline-none focus:ring-4 focus:ring-black/15 disabled:cursor-not-allowed disabled:bg-[#aeb7c5] disabled:shadow-none"
           >
-            {isSubmitting ? getSubmitLabel(uploadItems) : "Generate"}
+            {isSubmitting ? getSubmitLabel(uploadItems) : "生成"}
           </button>
         </form>
       </section>

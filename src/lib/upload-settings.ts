@@ -1,5 +1,5 @@
 export const DEFAULT_UPLOAD_PROMPT =
-  "Create a key-event video with voiceover and subtitles";
+  "生成带旁白和字幕的关键事件视频";
 
 export const MAX_BATCH_UPLOAD_FILES = 10;
 

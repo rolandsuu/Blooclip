@@ -1,7 +1,7 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { isAuthDisabledForDev } from "@/lib/dev-auth";
+import { isAuthDisabled } from "@/lib/dev-auth";
 import { getSupabasePublicConfig } from "@/lib/supabase-config";
 
 export async function proxy(request: NextRequest) {
@@ -9,7 +9,7 @@ export async function proxy(request: NextRequest) {
     request,
   });
 
-  if (isAuthDisabledForDev()) {
+  if (isAuthDisabled()) {
     return response;
   }
 

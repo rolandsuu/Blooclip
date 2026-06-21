@@ -29,132 +29,132 @@ type StageCopy = {
 
 const STAGE_COPY: Record<string, StageCopy> = {
   created: {
-    title: "Waiting for your video",
-    detail: "Add a video and prompt when you are ready.",
+    title: "等待你的视频",
+    detail: "准备好后添加视频和提示词。",
   },
   selected: {
-    title: "Videos selected",
-    detail: "Review the selected videos, then send them to Blooclip.",
+    title: "已选择视频",
+    detail: "确认视频后发送给 Blooclip。",
   },
   uploaded: {
-    title: "Ready to start",
-    detail: "The upload is ready. Blooclip can begin the AI work.",
+    title: "准备开始",
+    detail: "上传已准备好，Blooclip 可以开始 AI 处理。",
   },
   creating_upload: {
-    title: "Preparing upload",
-    detail: "Blooclip is creating secure upload links for your videos.",
+    title: "正在准备上传",
+    detail: "Blooclip 正在为视频创建安全上传链接。",
   },
   uploading: {
-    title: "Uploading videos",
-    detail: "Your browser is sending the selected videos to storage.",
+    title: "正在上传视频",
+    detail: "浏览器正在把已选择的视频发送到存储。",
   },
   marking_failed: {
-    title: "Saving upload errors",
-    detail: "Blooclip is recording which uploads need another try.",
+    title: "正在保存上传错误",
+    detail: "Blooclip 正在记录需要重试的上传。",
   },
   queueing: {
-    title: "Starting AI processing",
-    detail: "Uploaded videos are being sent to the AI worker.",
+    title: "正在启动 AI 处理",
+    detail: "已上传的视频正在发送给 AI 处理器。",
   },
   redirecting: {
-    title: "Opening batch status",
-    detail: "Blooclip is opening the page where processing will continue.",
+    title: "正在打开批量状态",
+    detail: "Blooclip 正在打开后续处理页面。",
   },
   queued: {
-    title: "Waiting for AI worker",
-    detail: "Your video is in line and will start soon.",
+    title: "等待 AI 处理器",
+    detail: "你的视频正在排队，很快会开始处理。",
   },
   downloading_source: {
-    title: "Opening your video",
-    detail: "Blooclip is loading the source file for processing.",
+    title: "正在打开视频",
+    detail: "Blooclip 正在加载源文件用于处理。",
   },
   extracting_audio: {
-    title: "Listening to the audio",
-    detail: "Blooclip is separating the sound from the video.",
+    title: "正在读取音频",
+    detail: "Blooclip 正在从视频中分离声音。",
   },
   transcribing_audio: {
-    title: "Writing the transcript",
-    detail: "AI is turning the spoken audio into text.",
+    title: "正在生成转写",
+    detail: "AI 正在把语音转换成文字。",
   },
   transcript_ready: {
-    title: "Transcript ready",
-    detail: "The speech text is ready for the next AI step.",
+    title: "转写已完成",
+    detail: "语音文字已准备好进入下一步 AI 处理。",
   },
   analyzing_video_events: {
-    title: "Finding key moments",
-    detail: "AI is looking for the important actions in the video.",
+    title: "正在寻找关键时刻",
+    detail: "AI 正在识别视频里的重要动作。",
   },
   video_event_analysis_ready: {
-    title: "Key moments found",
-    detail: "The main events are ready for editing decisions.",
+    title: "关键时刻已找到",
+    detail: "主要事件已准备好用于剪辑决策。",
   },
   sampling_frames: {
-    title: "Taking visual snapshots",
-    detail: "Blooclip is grabbing frames so AI can inspect the scene.",
+    title: "正在截取画面",
+    detail: "Blooclip 正在提取画面，让 AI 理解场景。",
   },
   analyzing_visuals: {
-    title: "Understanding your video",
-    detail: "AI is reading the visual details and action sequence.",
+    title: "正在理解视频",
+    detail: "AI 正在读取画面细节和动作顺序。",
   },
   visual_analysis_ready: {
-    title: "Visual understanding ready",
-    detail: "The video scene analysis is ready for planning.",
+    title: "画面理解已完成",
+    detail: "视频场景分析已准备好用于规划。",
   },
   planning_segments: {
-    title: "Planning the edit",
-    detail: "AI is choosing the best parts for the final tutorial.",
+    title: "正在规划剪辑",
+    detail: "AI 正在选择最适合最终教程的片段。",
   },
   edit_plan_ready: {
-    title: "Edit plan ready",
-    detail: "The cut list and timing plan are ready.",
+    title: "剪辑计划已完成",
+    detail: "剪辑列表和时间安排已准备好。",
   },
   writing_instruction_document: {
-    title: "Writing the instruction guide",
-    detail: "AI is building the step-by-step document.",
+    title: "正在编写操作文档",
+    detail: "AI 正在生成分步骤说明。",
   },
   instruction_document_ready: {
-    title: "Instruction guide ready",
-    detail: "The document and PDF are ready for download soon.",
+    title: "操作文档已完成",
+    detail: "文档和 PDF 很快可以下载。",
   },
   writing_script: {
-    title: "Writing the voiceover",
-    detail: "AI is preparing the narration script.",
+    title: "正在编写旁白",
+    detail: "AI 正在准备解说脚本。",
   },
   generating_voiceover: {
-    title: "Generating the voiceover",
-    detail: "Blooclip is creating the narrated audio track.",
+    title: "正在生成旁白",
+    detail: "Blooclip 正在创建解说音轨。",
   },
   building_subtitles: {
-    title: "Building subtitles",
-    detail: "Blooclip is timing the captions to the voiceover.",
+    title: "正在制作字幕",
+    detail: "Blooclip 正在把字幕和旁白对齐。",
   },
   voiceover_subtitles_ready: {
-    title: "Voiceover and subtitles ready",
-    detail: "The narration and captions are ready for rendering.",
+    title: "旁白和字幕已完成",
+    detail: "解说和字幕已准备好进入渲染。",
   },
   cutting_clips: {
-    title: "Cutting the clips",
-    detail: "Blooclip is assembling the selected video moments.",
+    title: "正在剪辑片段",
+    detail: "Blooclip 正在组装选中的视频时刻。",
   },
   rendering_final: {
-    title: "Rendering final video",
-    detail: "Blooclip is combining video, voiceover, and subtitles.",
+    title: "正在渲染最终视频",
+    detail: "Blooclip 正在合成视频、旁白和字幕。",
   },
   uploading_final: {
-    title: "Saving final video",
-    detail: "Blooclip is uploading the finished MP4.",
+    title: "正在保存最终视频",
+    detail: "Blooclip 正在上传完成的 MP4。",
   },
   completed: {
-    title: "Final video ready",
-    detail: "The AI processing is complete.",
+    title: "最终视频已完成",
+    detail: "AI 处理已完成。",
   },
   canceled: {
-    title: "Processing canceled",
-    detail: "This job was stopped before it finished.",
+    title: "处理已取消",
+    detail: "这个任务在完成前已停止。",
   },
   upload_failed: {
-    title: "Upload failed",
-    detail: "The video did not finish uploading. Try again with a new upload.",
+    title: "上传失败",
+    detail: "视频没有成功上传。请重新选择视频后再试。",
   },
 };
 
@@ -173,17 +173,17 @@ function clampProgress(progress: number | null | undefined) {
 function getStatusLabel(tone: ProcessingDisplayTone) {
   switch (tone) {
     case "active":
-      return "Working";
+      return "处理中";
     case "success":
-      return "Done";
+      return "完成";
     case "error":
-      return "Needs attention";
+      return "需要处理";
     case "canceled":
-      return "Canceled";
+      return "已取消";
     case "loading":
-      return "Loading";
+      return "加载中";
     case "idle":
-      return "Waiting";
+      return "等待中";
   }
 }
 
@@ -218,8 +218,8 @@ export function getProcessingDisplay(
     return buildDisplay(
       input,
       {
-        title: "Loading status",
-        detail: "Checking the latest processing update.",
+        title: "正在加载状态",
+        detail: "正在检查最新处理进度。",
       },
       "loading"
     );
@@ -233,10 +233,8 @@ export function getProcessingDisplay(
     return buildDisplay(
       input,
       {
-        title: "Processing failed",
-        detail:
-          input.errorMessage?.trim() ||
-          "Blooclip could not finish this video.",
+        title: "处理失败",
+        detail: "Blooclip 没能完成这个视频。请重新上传后再试。",
       },
       "error"
     );
@@ -261,8 +259,8 @@ export function getProcessingDisplay(
   return buildDisplay(
     input,
     {
-      title: "AI is working",
-      detail: "Blooclip is processing this video.",
+      title: "AI 正在处理",
+      detail: "Blooclip 正在处理这个视频。",
     },
     status === "queued" || status === "processing" ? "active" : "idle"
   );

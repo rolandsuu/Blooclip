@@ -33,22 +33,7 @@ type InstructionDocumentResponse = {
 };
 
 async function readErrorMessage(response: Response, fallback: string) {
-  const text = await response.text().catch(() => "");
-
-  if (!text) {
-    return fallback;
-  }
-
-  try {
-    const data = JSON.parse(text) as { error?: unknown };
-
-    if (typeof data.error === "string" && data.error.trim()) {
-      return data.error;
-    }
-  } catch {
-    return text;
-  }
-
+  await response.text().catch(() => "");
   return fallback;
 }
 
@@ -63,7 +48,7 @@ function formatTimestamp(seconds: number) {
 export default function InstructionsPage() {
   const params = useParams<{ videoId: string }>();
   const [data, setData] = useState<InstructionDocumentResponse | null>(null);
-  const [message, setMessage] = useState("Loading instruction document...");
+  const [message, setMessage] = useState("正在加载操作文档...");
 
   useEffect(() => {
     let active = true;
@@ -77,7 +62,7 @@ export default function InstructionsPage() {
         if (!response.ok) {
           const error = await readErrorMessage(
             response,
-            "Failed to load instruction document"
+            "加载操作文档失败。"
           );
 
           if (active) {
@@ -91,11 +76,11 @@ export default function InstructionsPage() {
 
         if (active) {
           setData(result);
-          setMessage("Instruction document loaded");
+          setMessage("操作文档已加载。");
         }
-      } catch (error) {
+      } catch {
         if (active) {
-          setMessage(error instanceof Error ? error.message : "Load failed");
+          setMessage("加载失败，请稍后重试。");
         }
       }
     }
@@ -120,7 +105,7 @@ export default function InstructionsPage() {
           href={`/videos/${params.videoId}`}
           className="text-sm font-medium text-gray-600"
         >
-          Back to video status
+          返回视频状态
         </Link>
 
         <button
@@ -128,14 +113,14 @@ export default function InstructionsPage() {
           disabled={!data?.pdfDownloadUrl}
           className="rounded bg-black px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
         >
-          Download PDF
+          下载 PDF
         </button>
       </div>
 
       {data ? (
         <>
           <header className="space-y-3 border-b border-gray-200 pb-6">
-            <p className="text-sm text-gray-500">Instruction document</p>
+            <p className="text-sm text-gray-500">操作文档</p>
             <h1 className="text-3xl font-semibold">{data.document.title}</h1>
             <p className="text-base leading-7 text-gray-700">
               {data.document.overview}
@@ -172,7 +157,7 @@ export default function InstructionsPage() {
 
           {data.document.warnings.length > 0 && (
             <section className="space-y-3">
-              <h2 className="text-lg font-semibold">Warnings</h2>
+              <h2 className="text-lg font-semibold">注意事项</h2>
               <ul className="list-disc space-y-2 pl-5 text-sm text-gray-600">
                 {data.document.warnings.map((warning) => (
                   <li key={warning}>{warning}</li>

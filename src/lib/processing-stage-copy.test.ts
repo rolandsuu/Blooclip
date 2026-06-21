@@ -3,28 +3,28 @@ import test from "node:test";
 
 import { getProcessingDisplay } from "./processing-stage-copy.ts";
 
-test("getProcessingDisplay maps queued state to plain waiting copy", () => {
+test("getProcessingDisplay maps queued state to plain Chinese waiting copy", () => {
   const display = getProcessingDisplay({
     status: "queued",
     currentStage: "queued",
     progress: 5,
   });
 
-  assert.equal(display.title, "Waiting for AI worker");
-  assert.equal(display.statusLabel, "Working");
+  assert.equal(display.title, "等待 AI 处理器");
+  assert.equal(display.statusLabel, "处理中");
   assert.equal(display.tone, "active");
   assert.equal(display.progress, 5);
 });
 
-test("getProcessingDisplay maps visual analysis to newbie-friendly copy", () => {
+test("getProcessingDisplay maps visual analysis to Chinese copy", () => {
   const display = getProcessingDisplay({
     status: "processing",
     currentStage: "analyzing_visuals",
     progress: 50,
   });
 
-  assert.equal(display.title, "Understanding your video");
-  assert.match(display.detail, /visual details/);
+  assert.equal(display.title, "正在理解视频");
+  assert.match(display.detail, /画面细节/);
   assert.equal(display.tone, "active");
 });
 
@@ -35,13 +35,13 @@ test("getProcessingDisplay shows completed work as done at 100 percent", () => {
     progress: 98,
   });
 
-  assert.equal(display.title, "Final video ready");
-  assert.equal(display.statusLabel, "Done");
+  assert.equal(display.title, "最终视频已完成");
+  assert.equal(display.statusLabel, "完成");
   assert.equal(display.tone, "success");
   assert.equal(display.progress, 100);
 });
 
-test("getProcessingDisplay keeps provider error messages visible", () => {
+test("getProcessingDisplay hides raw provider error messages from visible copy", () => {
   const display = getProcessingDisplay({
     status: "failed",
     currentStage: "rendering_final",
@@ -49,8 +49,8 @@ test("getProcessingDisplay keeps provider error messages visible", () => {
     errorMessage: "ffmpeg failed while rendering subtitles",
   });
 
-  assert.equal(display.title, "Processing failed");
-  assert.equal(display.detail, "ffmpeg failed while rendering subtitles");
+  assert.equal(display.title, "处理失败");
+  assert.equal(display.detail, "Blooclip 没能完成这个视频。请重新上传后再试。");
   assert.equal(display.tone, "error");
 });
 
@@ -61,8 +61,8 @@ test("getProcessingDisplay handles canceled jobs", () => {
     progress: 24,
   });
 
-  assert.equal(display.title, "Processing canceled");
-  assert.equal(display.statusLabel, "Canceled");
+  assert.equal(display.title, "处理已取消");
+  assert.equal(display.statusLabel, "已取消");
   assert.equal(display.tone, "canceled");
 });
 
@@ -74,8 +74,8 @@ test("getProcessingDisplay handles upload failures before generic failures", () 
     errorMessage: "Network connection dropped",
   });
 
-  assert.equal(display.title, "Upload failed");
-  assert.match(display.detail, /did not finish uploading/);
+  assert.equal(display.title, "上传失败");
+  assert.match(display.detail, /没有成功上传/);
   assert.equal(display.tone, "error");
 });
 
@@ -86,8 +86,8 @@ test("getProcessingDisplay falls back safely for unknown stages", () => {
     progress: 142,
   });
 
-  assert.equal(display.title, "AI is working");
-  assert.equal(display.detail, "Blooclip is processing this video.");
+  assert.equal(display.title, "AI 正在处理");
+  assert.equal(display.detail, "Blooclip 正在处理这个视频。");
   assert.equal(display.tone, "active");
   assert.equal(display.progress, 100);
 });

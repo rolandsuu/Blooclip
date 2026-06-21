@@ -34,6 +34,12 @@ available.
 For local UI development only, set `AUTH_DISABLED_FOR_DEV=true` in `.env.local`
 to skip magic-link sign-in. This flag is ignored when `NODE_ENV=production`.
 
+To turn off the app login gate in production, set `AUTH_DISABLED=true` in the
+deployment environment. Supabase is still required for database access, but the
+app will skip Supabase Auth and treat all visitors as a shared bypass user. This
+makes the app public to anyone with the URL, including access to paid upload and
+processing services.
+
 `ASSEMBLYAI_BASE_URL` is optional and defaults to `https://api.assemblyai.com`.
 `OPENAI_BASE_URL` is optional and defaults to `https://api.openai.com/v1`.
 `OPENAI_WORKER_MODEL` is optional and defaults to `gpt-5-mini`.
