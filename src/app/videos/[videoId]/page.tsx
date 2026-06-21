@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
+import { ProcessingBoard } from "@/app/_components/processing-board";
+
 type VideoStatus = {
   id: string;
   status: string;
@@ -164,32 +166,12 @@ export default function VideoPage() {
         <h1 className="text-2xl font-semibold">Video Status</h1>
       </div>
 
-      <div className="space-y-3">
-        <div className="flex items-center justify-between gap-4 text-sm">
-          <span>Status</span>
-          <span className="font-mono">{video?.status ?? "loading"}</span>
-        </div>
-
-        <div className="flex items-center justify-between gap-4 text-sm">
-          <span>Stage</span>
-          <span className="font-mono">{video?.currentStage ?? "loading"}</span>
-        </div>
-
-        <div className="h-3 overflow-hidden rounded bg-gray-200">
-          <div
-            className="h-full rounded bg-black transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-
-        <p className="text-sm text-gray-600">Progress: {progress}%</p>
-      </div>
-
-      {video?.errorMessage && (
-        <p className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          {video.errorMessage}
-        </p>
-      )}
+      <ProcessingBoard
+        status={video?.status ?? "loading"}
+        currentStage={video?.currentStage ?? null}
+        progress={progress}
+        errorMessage={video?.errorMessage ?? null}
+      />
 
       <button
         onClick={downloadVideo}

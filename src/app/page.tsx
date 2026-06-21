@@ -3,26 +3,34 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
 
-const processingSteps = [
+import { ProcessingBoard } from "@/app/_components/processing-board";
+import type { ProcessingDisplayInput } from "@/lib/processing-stage-copy";
+
+const demoProcessingStages: ProcessingDisplayInput[] = [
   {
-    title: "Waiting",
-    detail: "Upload a video, write a prompt, and send when ready.",
+    status: "created",
+    currentStage: "created",
+    progress: 0,
   },
   {
-    title: "Reading video",
-    detail: "Checking the uploaded file in this browser preview.",
+    status: "processing",
+    currentStage: "downloading_source",
+    progress: 8,
   },
   {
-    title: "Understanding scenes",
-    detail: "Simulating how the AI would inspect the important moments.",
+    status: "processing",
+    currentStage: "analyzing_visuals",
+    progress: 50,
   },
   {
-    title: "Planning edit",
-    detail: "Simulating a simple edit plan from your prompt.",
+    status: "processing",
+    currentStage: "planning_segments",
+    progress: 60,
   },
   {
-    title: "Ready for backend",
-    detail: "Frontend preview is ready. Backend processing is disconnected.",
+    status: "completed",
+    currentStage: "completed",
+    progress: 100,
   },
 ];
 
@@ -32,22 +40,6 @@ function formatFileSize(bytes: number) {
   }
 
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function getStepState(index: number, currentIndex: number, isProcessing: boolean) {
-  if (index < currentIndex) {
-    return "Done";
-  }
-
-  if (index === currentIndex && isProcessing) {
-    return "Working";
-  }
-
-  if (index === currentIndex && currentIndex === processingSteps.length - 1) {
-    return "Ready";
-  }
-
-  return "Waiting";
 }
 
 export default function Home() {
@@ -74,17 +66,17 @@ export default function Home() {
 
     const nextStepIndex = Math.min(
       progressStepIndex + 1,
-      processingSteps.length - 1
+      demoProcessingStages.length - 1
     );
 
-    if (progressStepIndex >= processingSteps.length - 1) {
+    if (progressStepIndex >= demoProcessingStages.length - 1) {
       return;
     }
 
     const timeout = window.setTimeout(() => {
       setProgressStepIndex(nextStepIndex);
 
-      if (nextStepIndex >= processingSteps.length - 1) {
+      if (nextStepIndex >= demoProcessingStages.length - 1) {
         setIsProcessing(false);
       }
     }, 1100);
@@ -122,7 +114,7 @@ export default function Home() {
   }
 
   const hasInput = Boolean(prompt.trim()) || Boolean(selectedFile);
-  const finalStepReady = progressStepIndex === processingSteps.length - 1;
+  const demoProcessingStage = demoProcessingStages[progressStepIndex];
 
   return (
     <main className="min-h-screen bg-white text-black lg:h-screen lg:overflow-hidden">
@@ -142,67 +134,12 @@ export default function Home() {
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-8">
             <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
-              <section className="rounded-md border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
-                <div className="flex items-start gap-3">
-                  <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-black text-xs font-semibold text-white">
-                    AI
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <h1 className="text-lg font-semibold tracking-tight">
-                      AI processing board
-                    </h1>
-                    <p className="mt-1 text-sm leading-6 text-black/60">
-                      This board only shows local simulated progress. It does
-                      not upload, process, or download through the backend.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-5 space-y-3">
-                  {processingSteps.map((step, index) => {
-                    const stepState = getStepState(
-                      index,
-                      progressStepIndex,
-                      isProcessing
-                    );
-                    const isCurrent = index === progressStepIndex;
-                    const isDone = index < progressStepIndex;
-
-                    return (
-                      <div
-                        key={step.title}
-                        className={`grid grid-cols-[auto_1fr_auto] gap-3 rounded-md border p-3 transition ${
-                          isCurrent
-                            ? "border-black bg-white"
-                            : "border-black/10 bg-black/[0.015]"
-                        }`}
-                      >
-                        <div
-                          className={`mt-1 h-2.5 w-2.5 rounded-full ${
-                            isDone || isCurrent ? "bg-black" : "bg-black/20"
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <p className="text-sm font-medium">{step.title}</p>
-                          <p className="mt-1 text-sm leading-5 text-black/55">
-                            {step.detail}
-                          </p>
-                        </div>
-                        <span className="rounded border border-black/10 bg-white px-2 py-1 text-xs font-medium text-black/55">
-                          {stepState}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {finalStepReady && (
-                  <div className="mt-4 rounded-md border border-black bg-black px-3 py-2 text-sm text-white">
-                    Ready for backend connection. Final AI output is not
-                    generated in this frontend-only version.
-                  </div>
-                )}
-              </section>
+              <ProcessingBoard
+                label="AI processing board"
+                status={demoProcessingStage.status}
+                currentStage={demoProcessingStage.currentStage}
+                progress={demoProcessingStage.progress}
+              />
             </div>
           </div>
 

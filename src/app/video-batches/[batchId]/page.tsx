@@ -4,6 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
+import { ProcessingBoard } from "@/app/_components/processing-board";
+import type { ProcessingDisplayInput } from "@/lib/processing-stage-copy";
+
 type BatchVideoStatus = {
   id: string;
   batchPosition: number | null;
@@ -65,6 +68,66 @@ function getProgress(batch: BatchStatus | null) {
 
 function isTerminalStatus(status: string) {
   return status === "completed" || status === "failed";
+}
+
+function pluralizeVideo(count: number) {
+  return count === 1 ? "video" : "videos";
+}
+
+function getBatchProcessingInput(
+  batch: BatchStatus | null,
+  progress: number
+): ProcessingDisplayInput {
+  if (!batch) {
+    return {
+      status: "loading",
+      currentStage: null,
+      progress: 0,
+    };
+  }
+
+  const activeVideo = batch.videos.find(
+    (video) => !isTerminalStatus(video.status)
+  );
+
+  if (activeVideo) {
+    return {
+      status: activeVideo.status,
+      currentStage: activeVideo.currentStage ?? activeVideo.status,
+      progress,
+      errorMessage: activeVideo.errorMessage,
+    };
+  }
+
+  const failedCount = batch.videos.filter(
+    (video) => video.status === "failed"
+  ).length;
+
+  if (failedCount > 0) {
+    return {
+      status: "failed",
+      currentStage: "failed",
+      progress,
+      errorMessage: `${failedCount} ${pluralizeVideo(failedCount)} failed.`,
+    };
+  }
+
+  if (
+    batch.videos.length >= batch.expectedVideoCount &&
+    batch.videos.every((video) => video.status === "completed")
+  ) {
+    return {
+      status: "completed",
+      currentStage: "completed",
+      progress: 100,
+    };
+  }
+
+  return {
+    status: "created",
+    currentStage: "created",
+    progress,
+  };
 }
 
 export default function BatchPage() {
@@ -129,6 +192,7 @@ export default function BatchPage() {
       0,
     [batch]
   );
+  const batchProcessingInput = getBatchProcessingInput(batch, progress);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-4xl flex-col gap-6 p-6 py-10">
@@ -164,13 +228,13 @@ export default function BatchPage() {
           </div>
         </div>
 
-        <div className="h-3 overflow-hidden rounded bg-gray-200">
-          <div
-            className="h-full rounded bg-black transition-all"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-        <p className="text-sm text-gray-600">Overall progress: {progress}%</p>
+        <ProcessingBoard
+          label="Batch AI processing"
+          status={batchProcessingInput.status}
+          currentStage={batchProcessingInput.currentStage}
+          progress={batchProcessingInput.progress}
+          errorMessage={batchProcessingInput.errorMessage}
+        />
       </section>
 
       <section className="space-y-3">
@@ -178,8 +242,6 @@ export default function BatchPage() {
 
         <div className="space-y-3">
           {(batch?.videos ?? []).map((video, index) => {
-            const videoProgress = Math.max(0, Math.min(100, video.progress));
-
             return (
               <div
                 key={video.id}
@@ -190,9 +252,6 @@ export default function BatchPage() {
                     <p className="truncate font-medium">
                       {(video.batchPosition ?? index) + 1}.{" "}
                       {video.filename ?? "Untitled video"}
-                    </p>
-                    <p className="text-sm text-gray-500">
-                      Stage: {video.currentStage ?? "waiting"}
                     </p>
                   </div>
                   <Link
@@ -207,24 +266,14 @@ export default function BatchPage() {
                   {video.prompt ?? "No prompt"}
                 </p>
 
-                <div className="grid gap-2">
-                  <div className="flex items-center justify-between gap-3 text-sm">
-                    <span className="font-mono">{video.status}</span>
-                    <span>{videoProgress}%</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded bg-gray-200">
-                    <div
-                      className="h-full rounded bg-black transition-all"
-                      style={{ width: `${videoProgress}%` }}
-                    />
-                  </div>
-                </div>
-
-                {video.errorMessage && (
-                  <p className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                    {video.errorMessage}
-                  </p>
-                )}
+                <ProcessingBoard
+                  compact
+                  status={video.status}
+                  currentStage={video.currentStage}
+                  progress={video.progress}
+                  errorMessage={video.errorMessage}
+                  className="bg-black/[0.015]"
+                />
               </div>
             );
           })}
