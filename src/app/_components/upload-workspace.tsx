@@ -1,7 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent, FormEvent } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { ChangeEvent, DragEvent, FormEvent } from "react";
 
 import {
   DEFAULT_TARGET_LANGUAGE,
@@ -18,103 +25,33 @@ type RejectedUploadItem = {
   error: string;
 };
 
-type UploadAttachment = PreparedClientUploadFile<File> & {
+type UploadSelection = PreparedClientUploadFile<File> & {
   id: string;
   previewUrl: string;
 };
 
-type ConversationMessage = {
+type MockJobStatus = "queued" | "processing" | "ready" | "error";
+
+type MockJob = {
   id: string;
-  role: "assistant" | "user";
-  text: string;
-  attachments?: UploadAttachment[];
-};
-
-type ChatPhase =
-  | "idle"
-  | "clarifying"
-  | "planned"
-  | "editing"
-  | "processing"
-  | "complete";
-
-type MockTimelineStep = {
-  id: string;
-  title: string;
-  detail: string;
-};
-
-type MockPlan = {
-  objective: string;
+  filename: string;
+  contentType: string;
+  size: number;
+  previewUrl: string;
+  prompt: string;
   targetLanguage: string;
   targetLanguageLabel: string;
-  files: string[];
-  steps: MockTimelineStep[];
-  outputs: string[];
+  status: MockJobStatus;
+  progress: number;
+  stage: string;
+  createdAt: number;
 };
 
 const UPLOAD_ACCEPT_ATTRIBUTE =
   "video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov";
 
-const TIMELINE_STEPS: MockTimelineStep[] = [
-  {
-    id: "uploading",
-    title: "uploading",
-    detail: "Stage local video attachments for the mock task.",
-  },
-  {
-    id: "analyzing-video",
-    title: "analyzing video",
-    detail: "Review scenes, motion, and the strongest tutorial moments.",
-  },
-  {
-    id: "extracting-transcript",
-    title: "extracting transcript",
-    detail: "Build a working transcript from speech and visible context.",
-  },
-  {
-    id: "generating-edit-plan",
-    title: "generating edit plan",
-    detail: "Choose the narrative structure, clips, and pacing.",
-  },
-  {
-    id: "creating-subtitles",
-    title: "creating subtitles",
-    detail: "Create readable subtitle cues in the selected language.",
-  },
-  {
-    id: "rendering-video",
-    title: "rendering video",
-    detail: "Assemble the mock final video preview.",
-  },
-  {
-    id: "generating-tutorial-document",
-    title: "generating tutorial document",
-    detail: "Draft a step-by-step tutorial document from the plan.",
-  },
-  {
-    id: "generating-webpage",
-    title: "generating webpage",
-    detail: "Prepare a shareable tutorial webpage artifact.",
-  },
-];
-
-const MOCK_OUTPUTS = [
-  "video preview",
-  "transcript",
-  "subtitles",
-  "document",
-  "webpage link",
-];
-
-const INITIAL_MESSAGES: ConversationMessage[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    text:
-      "Upload one or more videos, add a prompt, and I will draft a plan before any processing starts.",
-  },
-];
+const READY_STAGE = "Completed";
+const QUEUED_STAGE = "Waiting to start";
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -128,16 +65,18 @@ function formatFileSize(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function pluralizeVideo(count: number) {
-  return count === 1 ? "video" : "videos";
-}
-
 function getUploadItemId(file: File, index: number) {
   return `${file.name}-${file.size}-${file.lastModified}-${index}`;
 }
 
-function getMessageId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+function getBaseFilename(filename: string) {
+  const dotIndex = filename.lastIndexOf(".");
+
+  if (dotIndex <= 0) {
+    return filename || "blooclip-video";
+  }
+
+  return filename.slice(0, dotIndex);
 }
 
 function getTargetLanguageLabel(value: string) {
@@ -147,55 +86,354 @@ function getTargetLanguageLabel(value: string) {
   );
 }
 
-function createMockPlan(options: {
-  objective: string;
-  targetLanguage: string;
-  attachments: UploadAttachment[];
-}): MockPlan {
-  return {
-    objective:
-      options.objective.trim() ||
-      "Create a concise tutorial from the uploaded videos.",
-    targetLanguage: options.targetLanguage,
-    targetLanguageLabel: getTargetLanguageLabel(options.targetLanguage),
-    files: options.attachments.map((attachment) => attachment.filename),
-    steps: TIMELINE_STEPS,
-    outputs: MOCK_OUTPUTS,
-  };
+function getProcessingStage(progress: number) {
+  if (progress < 30) return "Analyzing video";
+  if (progress < 55) return "Writing edit plan";
+  if (progress < 78) return "Rendering AI edit";
+  if (progress < 94) return "Building instruction PDF";
+  return "Finalizing downloads";
 }
 
-function RoleAvatar({ role }: { role: ConversationMessage["role"] }) {
+function getStatusLabel(status: MockJobStatus) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "processing":
+      return "Processing";
+    case "ready":
+      return "Ready";
+    case "error":
+      return "Error";
+  }
+}
+
+function getStatusClasses(status: MockJobStatus) {
+  switch (status) {
+    case "queued":
+      return {
+        dot: "bg-[#ff9f0a]",
+        text: "text-[#b76a00]",
+        bar: "bg-[#ff9f0a]",
+      };
+    case "processing":
+      return {
+        dot: "processing-dot-pulse bg-[#155dfc]",
+        text: "text-[#155dfc]",
+        bar: "bg-[#155dfc]",
+      };
+    case "ready":
+      return {
+        dot: "bg-[#20a03f]",
+        text: "text-[#198a35]",
+        bar: "bg-[#20a03f]",
+      };
+    case "error":
+      return {
+        dot: "bg-[#e92b2b]",
+        text: "text-[#c81818]",
+        bar: "bg-[#e92b2b]",
+      };
+  }
+}
+
+function toPdfText(value: string) {
+  return value
+    .replace(/[^\x20-\x7E]/g, "?")
+    .replace(/\\/g, "\\\\")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
+}
+
+function wrapText(value: string, maxLength = 72) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+
+  if (!normalized) {
+    return ["No prompt provided."];
+  }
+
+  const lines: string[] = [];
+  let currentLine = "";
+
+  for (const word of normalized.split(" ")) {
+    if (!currentLine) {
+      currentLine = word;
+      continue;
+    }
+
+    if (`${currentLine} ${word}`.length > maxLength) {
+      lines.push(currentLine);
+      currentLine = word;
+      continue;
+    }
+
+    currentLine = `${currentLine} ${word}`;
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.slice(0, 5);
+}
+
+function buildPdfDocument(content: string) {
+  const encoder = new TextEncoder();
+  const contentLength = encoder.encode(content).length;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${contentLength} >>\nstream\n${content}\nendstream`,
+  ];
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+
+  objects.forEach((object, index) => {
+    offsets.push(encoder.encode(pdf).length);
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = encoder.encode(pdf).length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  for (const offset of offsets.slice(1)) {
+    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF`;
+
+  return pdf;
+}
+
+function createMockInstructionPdf(job: MockJob) {
+  const promptLines = wrapText(job.prompt);
+  const textLines = [
+    { x: 72, y: 720, size: 24, text: "Blooclip Instruction PDF" },
+    { x: 72, y: 690, size: 12, text: `Video: ${job.filename}` },
+    {
+      x: 72,
+      y: 670,
+      size: 12,
+      text: `Target language: ${job.targetLanguageLabel}`,
+    },
+    { x: 72, y: 642, size: 14, text: "Instruction" },
+    ...promptLines.map((line, index) => ({
+      x: 72,
+      y: 620 - index * 18,
+      size: 11,
+      text: line,
+    })),
+    { x: 72, y: 500, size: 14, text: "Screenshot guide" },
+    { x: 72, y: 344, size: 11, text: "Screenshot 1: key action frame" },
+    { x: 320, y: 344, size: 11, text: "Screenshot 2: final result frame" },
+    { x: 72, y: 274, size: 14, text: "Steps" },
+    {
+      x: 72,
+      y: 250,
+      size: 11,
+      text: "1. Review the source video and find the key action.",
+    },
+    {
+      x: 72,
+      y: 232,
+      size: 11,
+      text: "2. Edit a concise AI video with voiceover and subtitles.",
+    },
+    {
+      x: 72,
+      y: 214,
+      size: 11,
+      text: "3. Use the screenshots to repeat the process.",
+    },
+  ];
+  const textCommands = textLines
+    .map(
+      (line) =>
+        `/F1 ${line.size} Tf 1 0 0 1 ${line.x} ${line.y} Tm (${toPdfText(
+          line.text
+        )}) Tj`
+    )
+    .join("\n");
+  const content = [
+    "q 0.95 0.96 0.98 rg 72 370 210 112 re f Q",
+    "q 0.78 0.81 0.87 RG 72 370 210 112 re S Q",
+    "q 0.12 0.14 0.18 rg 96 398 162 52 re f Q",
+    "q 0.95 0.96 0.98 rg 320 370 210 112 re f Q",
+    "q 0.78 0.81 0.87 RG 320 370 210 112 re S Q",
+    "q 0.88 0.18 0.18 rg 344 398 162 52 re f Q",
+    "BT",
+    textCommands,
+    "ET",
+  ].join("\n");
+
+  return new Blob([buildPdfDocument(content)], { type: "application/pdf" });
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadFromUrl(url: string, filename: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function UploadIcon({ className }: { className?: string }) {
   return (
-    <div
-      className={cx(
-        "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold",
-        role === "assistant"
-          ? "border border-black bg-black text-white"
-          : "border border-black/10 bg-white text-black"
-      )}
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2.4"
+      aria-hidden="true"
     >
-      {role === "assistant" ? "AI" : "You"}
-    </div>
+      <path d="M12 16V4" />
+      <path d="m7 9 5-5 5 5" />
+      <path d="M5 16v3h14v-3" />
+    </svg>
   );
 }
 
-function AttachmentCard({ attachment }: { attachment: UploadAttachment }) {
+function DownloadIcon({ className }: { className?: string }) {
   return (
-    <div className="grid min-w-0 gap-2 rounded-md border border-black/10 bg-white p-3 sm:grid-cols-[72px_minmax(0,1fr)]">
-      <video
-        src={attachment.previewUrl}
-        className="aspect-video w-full rounded bg-black object-cover sm:w-[72px]"
-        muted
-        playsInline
-        preload="metadata"
-      />
-      <div className="min-w-0">
-        <p className="truncate text-sm font-medium">{attachment.filename}</p>
-        <p className="mt-1 text-xs text-black/50">
-          {formatFileSize(attachment.size)} · {attachment.contentType}
-        </p>
-        <p className="mt-1 text-xs text-black/45">Attached to conversation</p>
-      </div>
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+function PdfIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      aria-hidden="true"
+    >
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v5h4" />
+      <path d="M9 14h6" />
+      <path d="M9 17h4" />
+    </svg>
+  );
+}
+
+function GlobeIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.3 2.6 3.5 5.6 3.5 9S14.3 18.4 12 21" />
+      <path d="M12 3c-2.3 2.6-3.5 5.6-3.5 9s1.2 6.4 3.5 9" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      aria-hidden="true"
+    >
+      <path d="m5 8 5 5 5-5" />
+    </svg>
+  );
+}
+
+function PlayIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <path d="M8 5.4v13.2L18.5 12z" />
+    </svg>
+  );
+}
+
+function HelpIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.8 9a2.4 2.4 0 0 1 4.5 1.2c0 1.8-2.3 2-2.3 3.8" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function UserIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="8" r="3.2" />
+      <path d="M5.5 20a6.7 6.7 0 0 1 13 0" />
+    </svg>
+  );
+}
+
+function LogoMark() {
+  return (
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#ee2b2f] text-xl font-black text-white shadow-sm shadow-red-600/20">
+      B
     </div>
   );
 }
@@ -206,13 +444,13 @@ function RejectedFiles({ rejectedItems }: { rejectedItems: RejectedUploadItem[] 
   }
 
   return (
-    <div className="space-y-2">
+    <div className="grid gap-2" aria-live="polite">
       {rejectedItems.map((item) => (
         <div
           key={item.id}
-          className="rounded-md border border-red-200 bg-red-50 p-3"
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3"
         >
-          <p className="truncate text-sm font-medium text-red-950">
+          <p className="truncate text-sm font-semibold text-red-950">
             {item.filename}
           </p>
           <p className="mt-1 text-sm text-red-800">{item.error}</p>
@@ -222,574 +460,403 @@ function RejectedFiles({ rejectedItems }: { rejectedItems: RejectedUploadItem[] 
   );
 }
 
-function ConversationMessageRow({ message }: { message: ConversationMessage }) {
-  const isUser = message.role === "user";
+function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
+  if (selections.length === 0) {
+    return null;
+  }
 
   return (
-    <div
-      className={cx(
-        "flex gap-3",
-        isUser ? "justify-end" : "justify-start"
-      )}
-    >
-      {!isUser && <RoleAvatar role={message.role} />}
-      <div
-        className={cx(
-          "max-w-[760px] space-y-3",
-          isUser ? "order-first w-full sm:w-auto" : "min-w-0 flex-1"
-        )}
-      >
-        <div
-          className={cx(
-            "rounded-md px-4 py-3 text-sm leading-6",
-            isUser
-              ? "ml-auto max-w-[760px] bg-black text-white"
-              : "border border-black/10 bg-white text-black shadow-sm shadow-black/[0.02]"
-          )}
-        >
-          {message.text}
-        </div>
-
-        {message.attachments && message.attachments.length > 0 && (
-          <div className="grid gap-2">
-            {message.attachments.map((attachment) => (
-              <AttachmentCard key={attachment.id} attachment={attachment} />
-            ))}
-          </div>
-        )}
-      </div>
-      {isUser && <RoleAvatar role={message.role} />}
-    </div>
-  );
-}
-
-function PlanCard({
-  plan,
-  phase,
-  editPlanText,
-  onEditPlanTextChange,
-  onStartEdit,
-  onSaveEdit,
-  onApprove,
-}: {
-  plan: MockPlan;
-  phase: ChatPhase;
-  editPlanText: string;
-  onEditPlanTextChange(value: string): void;
-  onStartEdit(): void;
-  onSaveEdit(): void;
-  onApprove(): void;
-}) {
-  const isEditing = phase === "editing";
-  const canAct = phase === "planned" || phase === "editing";
-
-  return (
-    <div className="flex gap-3">
-      <RoleAvatar role="assistant" />
-      <section className="w-full max-w-[760px] rounded-md border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase text-black/45">
-              Structured plan
-            </p>
-            <h2 className="mt-1 text-lg font-semibold tracking-tight">
-              Tutorial generation plan
-            </h2>
-          </div>
-          <span className="rounded border border-black/10 px-2 py-1 text-xs font-medium text-black/55">
-            Mock
-          </span>
-        </div>
-
-        <div className="mt-4 grid gap-4">
-          <div>
-            <p className="text-sm font-medium">Objective</p>
-            {isEditing ? (
-              <textarea
-                value={editPlanText}
-                onChange={(event) => onEditPlanTextChange(event.target.value)}
-                rows={3}
-                className="mt-2 w-full resize-none rounded-md border border-black/15 px-3 py-2 text-sm leading-6 outline-none focus:border-black"
-              />
-            ) : (
-              <p className="mt-1 text-sm leading-6 text-black/60">
-                {plan.objective}
-              </p>
-            )}
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="rounded-md border border-black/10 p-3">
-              <p className="text-xs font-medium uppercase text-black/45">
-                Videos
-              </p>
-              <p className="mt-1 text-sm font-medium">
-                {plan.files.length} {pluralizeVideo(plan.files.length)}
-              </p>
-              <p className="mt-1 truncate text-xs text-black/45">
-                {plan.files.join(", ")}
-              </p>
-            </div>
-            <div className="rounded-md border border-black/10 p-3">
-              <p className="text-xs font-medium uppercase text-black/45">
-                Target language
-              </p>
-              <p className="mt-1 text-sm font-medium">
-                {plan.targetLanguageLabel}
-              </p>
-              <p className="mt-1 text-xs text-black/45">
-                Stored as {plan.targetLanguage}
-              </p>
-            </div>
-          </div>
-
-          <div>
-            <p className="text-sm font-medium">Timeline</p>
-            <div className="mt-2 grid gap-2">
-              {plan.steps.map((step, index) => (
-                <div
-                  key={step.id}
-                  className="grid grid-cols-[auto_1fr] gap-3 rounded-md border border-black/10 p-3"
-                >
-                  <span className="flex h-6 w-6 items-center justify-center rounded bg-black text-xs font-semibold text-white">
-                    {index + 1}
-                  </span>
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium">{step.title}</p>
-                    <p className="mt-1 text-xs leading-5 text-black/50">
-                      {step.detail}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <p className="text-sm font-medium">Expected outputs</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {plan.outputs.map((output) => (
-                <span
-                  key={output}
-                  className="rounded border border-black/10 px-2 py-1 text-xs font-medium text-black/55"
-                >
-                  {output}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {canAct && (
-          <div className="mt-4 flex flex-wrap gap-2 border-t border-black/10 pt-4">
-            {isEditing ? (
-              <button
-                type="button"
-                onClick={onSaveEdit}
-                className="h-9 rounded-md bg-black px-3 text-sm font-semibold text-white transition hover:bg-black/80"
-              >
-                Save edits
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={onApprove}
-                  className="h-9 rounded-md bg-black px-3 text-sm font-semibold text-white transition hover:bg-black/80"
-                >
-                  Approve plan
-                </button>
-                <button
-                  type="button"
-                  onClick={onStartEdit}
-                  className="h-9 rounded-md border border-black/15 px-3 text-sm font-medium transition hover:border-black"
-                >
-                  Edit plan
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function TimelineCard({
-  steps,
-  activeStepIndex,
-}: {
-  steps: MockTimelineStep[];
-  activeStepIndex: number;
-}) {
-  return (
-    <div className="flex gap-3">
-      <RoleAvatar role="assistant" />
-      <section className="w-full max-w-[760px] rounded-md border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase text-black/45">
-              Processing timeline
-            </p>
-            <h2 className="mt-1 text-lg font-semibold tracking-tight">
-              Running approved plan
-            </h2>
-          </div>
-          <span className="rounded border border-black/10 px-2 py-1 text-xs font-medium text-black/55">
-            {Math.min(activeStepIndex, steps.length)}/{steps.length}
-          </span>
-        </div>
-
-        <div className="mt-4 grid gap-2">
-          {steps.map((step, index) => {
-            const isComplete = activeStepIndex > index;
-            const isActive = activeStepIndex === index;
-
-            return (
-              <div
-                key={step.id}
-                className={cx(
-                  "grid grid-cols-[auto_1fr_auto] items-start gap-3 rounded-md border p-3",
-                  isActive
-                    ? "border-black bg-black text-white"
-                    : "border-black/10 bg-white text-black"
-                )}
-              >
-                <span
-                  className={cx(
-                    "mt-1 h-2.5 w-2.5 rounded-full",
-                    isComplete
-                      ? "bg-black"
-                      : isActive
-                        ? "processing-dot-pulse bg-white"
-                        : "bg-black/25"
-                  )}
-                  aria-hidden="true"
-                />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{step.title}</p>
-                  <p
-                    className={cx(
-                      "mt-1 text-xs leading-5",
-                      isActive ? "text-white/70" : "text-black/50"
-                    )}
-                  >
-                    {step.detail}
-                  </p>
-                </div>
-                <span
-                  className={cx(
-                    "text-xs font-medium",
-                    isActive ? "text-white/70" : "text-black/45"
-                  )}
-                >
-                  {isComplete ? "done" : isActive ? "running" : "queued"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ArtifactCard({
-  plan,
-  firstAttachment,
-}: {
-  plan: MockPlan;
-  firstAttachment: UploadAttachment | null;
-}) {
-  return (
-    <div className="flex gap-3">
-      <RoleAvatar role="assistant" />
-      <section className="w-full max-w-[880px] rounded-md border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.03]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xs font-medium uppercase text-black/45">
-              Final artifacts
-            </p>
-            <h2 className="mt-1 text-lg font-semibold tracking-tight">
-              Mock outputs are ready
-            </h2>
-          </div>
-          <span className="rounded border border-black/10 px-2 py-1 text-xs font-medium text-black/55">
-            Frontend only
-          </span>
-        </div>
-
-        <div className="mt-4 grid gap-3 lg:grid-cols-2">
-          <div className="rounded-md border border-black/10 p-3">
-            <p className="text-sm font-medium">Video preview</p>
-            <div className="mt-3 overflow-hidden rounded-md bg-black">
-              {firstAttachment ? (
-                <video
-                  src={firstAttachment.previewUrl}
-                  controls
-                  className="aspect-video w-full bg-black"
-                />
-              ) : (
-                <div className="flex aspect-video items-center justify-center text-sm text-white/55">
-                  No video attached
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-md border border-black/10 p-3">
-            <p className="text-sm font-medium">Transcript</p>
-            <p className="mt-3 text-sm leading-6 text-black/60">
-              Welcome to this tutorial. First, we identify the key action. Next,
-              we explain each step clearly. Finally, we summarize the workflow so
-              viewers can repeat it.
-            </p>
-          </div>
-
-          <div className="rounded-md border border-black/10 p-3">
-            <p className="text-sm font-medium">Subtitles</p>
-            <pre className="mt-3 overflow-x-auto rounded bg-black/[0.03] p-3 text-xs leading-5 text-black/65">
-{`1
-00:00:00,000 --> 00:00:03,200
-Identify the key action.
-
-2
-00:00:03,200 --> 00:00:07,400
-Follow each step in order.`}
-            </pre>
-          </div>
-
-          <div className="rounded-md border border-black/10 p-3">
-            <p className="text-sm font-medium">Document</p>
-            <ol className="mt-3 list-decimal space-y-2 pl-4 text-sm leading-6 text-black/60">
-              <li>Overview: {plan.objective}</li>
-              <li>Steps: analyze, subtitle, render, publish.</li>
-              <li>Output language: {plan.targetLanguageLabel}.</li>
-            </ol>
-          </div>
-
+    <div className="rounded-lg border border-[#cfd5df] bg-white px-4 py-3 text-left">
+      <p className="text-sm font-semibold text-[#11131a]">
+        {selections.length} video{selections.length === 1 ? "" : "s"} selected
+      </p>
+      <div className="mt-3 grid gap-2">
+        {selections.map((selection) => (
           <div
-            id="mock-webpage-preview"
-            className="rounded-md border border-black/10 p-3 lg:col-span-2"
+            key={selection.id}
+            className="grid grid-cols-[56px_minmax(0,1fr)] items-center gap-3"
           >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-medium">Webpage</p>
-                <p className="mt-1 text-sm text-black/50">
-                  A mock tutorial page with video, transcript, and steps.
-                </p>
-              </div>
-              <a
-                href="#mock-webpage-preview"
-                className="rounded-md border border-black/15 px-3 py-2 text-sm font-medium transition hover:border-black"
-              >
-                Open webpage preview
-              </a>
+            <div className="flex aspect-video w-14 items-center justify-center rounded-md bg-[#eef1f6] text-[#11131a]">
+              <PlayIcon className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-[#11131a]">
+                {selection.filename}
+              </p>
+              <p className="text-xs text-[#6f7785]">
+                {formatFileSize(selection.size)} · {selection.contentType}
+              </p>
             </div>
           </div>
-        </div>
-      </section>
+        ))}
+      </div>
     </div>
   );
 }
 
-function Composer({
-  prompt,
-  targetLanguage,
-  attachmentCount,
-  totalSize,
-  phase,
-  onPromptChange,
-  onTargetLanguageChange,
-  onChooseVideos,
-  onSubmit,
-}: {
-  prompt: string;
-  targetLanguage: string;
-  attachmentCount: number;
-  totalSize: number;
-  phase: ChatPhase;
-  onPromptChange(value: string): void;
-  onTargetLanguageChange(value: string): void;
-  onChooseVideos(event: ChangeEvent<HTMLInputElement>): void;
-  onSubmit(event: FormEvent<HTMLFormElement>): void;
-}) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const isBusy = phase === "processing";
-  const isTaskLocked =
-    phase === "planned" ||
-    phase === "editing" ||
-    phase === "processing" ||
-    phase === "complete";
-  const canSubmit =
-    !isBusy &&
-    ((phase === "clarifying" && prompt.trim().length > 0) ||
-      (phase === "idle" && attachmentCount > 0));
-  const submitLabel =
-    phase === "clarifying"
-      ? "Answer"
-      : phase === "processing"
-        ? "Running"
-        : phase === "complete"
-          ? "Done"
-          : "Send";
+function DocumentPreview() {
+  return (
+    <div className="hidden w-[92px] shrink-0 rounded-md border border-[#d6dce7] bg-white p-2 shadow-sm shadow-black/[0.03] lg:block">
+      <div className="mb-2 h-1.5 w-11 rounded bg-[#1f2430]" />
+      <div className="mb-1 h-1 w-16 rounded bg-[#d7dce5]" />
+      <div className="mb-3 h-1 w-12 rounded bg-[#d7dce5]" />
+      <div className="grid grid-cols-2 gap-1.5">
+        <div className="aspect-video rounded-sm bg-[#eef1f6]">
+          <div className="mx-auto mt-2 h-3 w-4 rounded-sm bg-[#ee2b2f]" />
+        </div>
+        <div className="aspect-video rounded-sm bg-[#eef1f6]">
+          <div className="mx-auto mt-2 h-3 w-4 rounded-sm bg-[#11131a]" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileThumb() {
+  return (
+    <div className="relative h-[58px] w-[70px] shrink-0 overflow-hidden rounded-lg bg-[#eef1f6]">
+      <div className="absolute inset-0 flex items-center justify-center">
+        <PlayIcon className="h-7 w-7 text-[#11131a]" />
+      </div>
+    </div>
+  );
+}
+
+function ProgressCell({ job }: { job: MockJob }) {
+  const tone = getStatusClasses(job.status);
 
   return (
-    <form
-      onSubmit={onSubmit}
-      className="shrink-0 border-t border-black/10 bg-white px-4 py-3 sm:px-6"
-    >
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 rounded-md border border-black/15 bg-white p-3 shadow-lg shadow-black/[0.05]">
-        <label htmlFor="prompt" className="sr-only">
-          Prompt
-        </label>
-        <textarea
-          id="prompt"
-          value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
-          rows={2}
-          disabled={isTaskLocked}
-          placeholder={
-            phase === "clarifying"
-              ? "Answer the question so Blooclip can shape the plan..."
-              : "Tell Blooclip what you want these videos to become..."
-          }
-          className="max-h-40 min-h-12 w-full resize-none border-0 bg-transparent text-sm leading-6 text-black outline-none placeholder:text-black/35 disabled:text-black/45"
+    <div className="grid grid-cols-[44px_1fr] items-center gap-3">
+      <span className="font-mono text-sm font-semibold text-[#11131a]">
+        {job.status === "queued" ? "-" : `${job.progress}%`}
+      </span>
+      <div className="h-2 overflow-hidden rounded-full bg-[#e2e6ed]">
+        <div
+          className={cx("h-full rounded-full transition-all duration-500", tone.bar)}
+          style={{ width: `${job.status === "queued" ? 0 : job.progress}%` }}
         />
+      </div>
+    </div>
+  );
+}
 
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept={UPLOAD_ACCEPT_ATTRIBUTE}
-              onChange={onChooseVideos}
-              disabled={isTaskLocked}
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isTaskLocked}
-              className="h-9 rounded-md border border-black px-3 text-sm font-medium text-black transition hover:bg-black hover:text-white disabled:cursor-not-allowed disabled:border-black/15 disabled:text-black/35"
-            >
-              Attach videos
-            </button>
+function StatusCell({ job }: { job: MockJob }) {
+  const tone = getStatusClasses(job.status);
 
-            <label htmlFor="target-language" className="sr-only">
-              Target language
-            </label>
-            <select
-              id="target-language"
-              value={targetLanguage}
-              onChange={(event) => onTargetLanguageChange(event.target.value)}
-              disabled={isTaskLocked}
-              className="h-9 rounded-md border border-black/15 bg-white px-2 text-sm font-medium text-black disabled:text-black/35"
-            >
-              {TARGET_LANGUAGE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-2">
+        <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
+        <span className={cx("text-sm font-semibold", tone.text)}>
+          {getStatusLabel(job.status)}
+        </span>
+      </div>
+      <p className="mt-1 truncate text-sm text-[#6f7785]">{job.stage}</p>
+    </div>
+  );
+}
 
-            {attachmentCount > 0 && (
-              <p className="text-sm text-black/55">
-                {attachmentCount} selected · {formatFileSize(totalSize)}
-              </p>
-            )}
-          </div>
+function ResultActions({
+  job,
+  onDownloadVideo,
+  onDownloadPdf,
+}: {
+  job: MockJob;
+  onDownloadVideo(job: MockJob): void;
+  onDownloadPdf(job: MockJob): void;
+}) {
+  if (job.status !== "ready") {
+    return <span className="text-sm text-[#6f7785]">-</span>;
+  }
 
+  return (
+    <div className="flex min-w-[260px] items-center justify-end gap-4">
+      <DocumentPreview />
+      <div className="grid min-w-[220px] gap-2">
+        <button
+          type="button"
+          onClick={() => onDownloadVideo(job)}
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white shadow-sm shadow-red-600/20 transition hover:bg-[#d92327] focus:outline-none focus:ring-2 focus:ring-[#ee2b2f]/30"
+        >
+          <DownloadIcon className="h-4 w-4" />
+          Download AI-edited video
+        </button>
+        <button
+          type="button"
+          onClick={() => onDownloadPdf(job)}
+          className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#ee2b2f] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-[#ee2b2f]/25"
+        >
+          <PdfIcon className="h-4 w-4 text-[#ee2b2f]" />
+          Download instruction PDF
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobDesktopRow({
+  job,
+  onDownloadVideo,
+  onDownloadPdf,
+}: {
+  job: MockJob;
+  onDownloadVideo(job: MockJob): void;
+  onDownloadPdf(job: MockJob): void;
+}) {
+  return (
+    <li className="hidden grid-cols-[260px_250px_120px_190px_210px_1fr] items-center gap-5 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid">
+      <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
+        <FileThumb />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold text-[#11131a]">
+            {job.filename}
+          </p>
+          <p className="mt-1 text-sm text-[#6f7785]">{formatFileSize(job.size)}</p>
+        </div>
+      </div>
+      <p className="line-clamp-2 text-sm leading-5 text-[#11131a]">{job.prompt}</p>
+      <p className="text-sm text-[#11131a]">{job.targetLanguageLabel}</p>
+      <StatusCell job={job} />
+      <ProgressCell job={job} />
+      <ResultActions
+        job={job}
+        onDownloadVideo={onDownloadVideo}
+        onDownloadPdf={onDownloadPdf}
+      />
+    </li>
+  );
+}
+
+function JobMobileCard({
+  job,
+  onDownloadVideo,
+  onDownloadPdf,
+}: {
+  job: MockJob;
+  onDownloadVideo(job: MockJob): void;
+  onDownloadPdf(job: MockJob): void;
+}) {
+  return (
+    <li className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:hidden">
+      <div className="grid grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
+        <FileThumb />
+        <div className="min-w-0">
+          <p className="truncate text-sm font-bold text-[#11131a]">
+            {job.filename}
+          </p>
+          <p className="mt-1 text-sm text-[#6f7785]">
+            {formatFileSize(job.size)} · {job.targetLanguageLabel}
+          </p>
+        </div>
+      </div>
+      <p className="text-sm leading-5 text-[#11131a]">{job.prompt}</p>
+      <StatusCell job={job} />
+      <ProgressCell job={job} />
+      {job.status === "ready" ? (
+        <div className="grid gap-2">
           <button
-            type="submit"
-            disabled={!canSubmit}
-            className="h-9 rounded-md bg-black px-4 text-sm font-semibold text-white transition hover:bg-black/80 disabled:cursor-not-allowed disabled:bg-black/25"
+            type="button"
+            onClick={() => onDownloadVideo(job)}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white"
           >
-            {submitLabel}
+            <DownloadIcon className="h-4 w-4" />
+            Download AI-edited video
+          </button>
+          <button
+            type="button"
+            onClick={() => onDownloadPdf(job)}
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#ee2b2f] bg-white px-3 text-sm font-semibold text-[#11131a]"
+          >
+            <PdfIcon className="h-4 w-4 text-[#ee2b2f]" />
+            Download instruction PDF
           </button>
         </div>
-      </div>
-    </form>
+      ) : (
+        <p className="text-sm text-[#6f7785]">Result will appear here.</p>
+      )}
+    </li>
   );
 }
 
-function ChatTaskWorkspace() {
-  const [messages, setMessages] =
-    useState<ConversationMessage[]>(INITIAL_MESSAGES);
+function ProcessingList({
+  jobs,
+  onDownloadVideo,
+  onDownloadPdf,
+}: {
+  jobs: MockJob[];
+  onDownloadVideo(job: MockJob): void;
+  onDownloadPdf(job: MockJob): void;
+}) {
+  const sortedJobs = useMemo(
+    () => [...jobs].sort((a, b) => a.createdAt - b.createdAt),
+    [jobs]
+  );
+
+  return (
+    <section className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8">
+      <div className="mx-auto max-w-[1500px]">
+        <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
+          Processing
+        </h2>
+
+        <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
+          <div className="hidden grid-cols-[260px_250px_120px_190px_210px_1fr] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
+            <span>Video</span>
+            <span>Prompt</span>
+            <span>Language</span>
+            <span>Status</span>
+            <span>Progress</span>
+            <span>Result</span>
+          </div>
+
+          {sortedJobs.length > 0 ? (
+            <ul aria-live="polite">
+              {sortedJobs.map((job) => (
+                <Fragment key={job.id}>
+                  <JobDesktopRow
+                    job={job}
+                    onDownloadVideo={onDownloadVideo}
+                    onDownloadPdf={onDownloadPdf}
+                  />
+                  <JobMobileCard
+                    job={job}
+                    onDownloadVideo={onDownloadVideo}
+                    onDownloadPdf={onDownloadPdf}
+                  />
+                </Fragment>
+              ))}
+            </ul>
+          ) : (
+            <div className="grid min-h-[180px] place-items-center px-4 py-10 text-center">
+              <div>
+                <p className="text-base font-semibold text-[#11131a]">
+                  No videos are processing yet.
+                </p>
+                <p className="mt-2 text-sm text-[#6f7785]">
+                  Upload a video, write a prompt, choose a language, and click
+                  Generate.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function UploadWorkspace() {
   const [prompt, setPrompt] = useState("");
   const [targetLanguage, setTargetLanguage] = useState<string>(
     DEFAULT_TARGET_LANGUAGE
   );
-  const [attachments, setAttachments] = useState<UploadAttachment[]>([]);
+  const [selectedUploads, setSelectedUploads] = useState<UploadSelection[]>([]);
   const [rejectedItems, setRejectedItems] = useState<RejectedUploadItem[]>([]);
-  const [phase, setPhase] = useState<ChatPhase>("idle");
-  const [plan, setPlan] = useState<MockPlan | null>(null);
-  const [editPlanText, setEditPlanText] = useState("");
-  const [activeStepIndex, setActiveStepIndex] = useState(0);
-  const attachmentUrlsRef = useRef<string[]>([]);
-  const completionMessageAddedRef = useRef(false);
+  const [jobs, setJobs] = useState<MockJob[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedUrlsRef = useRef<string[]>([]);
+  const allObjectUrlsRef = useRef<string[]>([]);
 
-  const totalSize = useMemo(
-    () => attachments.reduce((total, item) => total + item.size, 0),
-    [attachments]
+  const selectedTotalSize = useMemo(
+    () => selectedUploads.reduce((total, item) => total + item.size, 0),
+    [selectedUploads]
   );
-  const firstAttachment = attachments[0] ?? null;
+  const canGenerate =
+    selectedUploads.length > 0 && prompt.trim().length > 0;
 
-  const releaseAttachmentUrls = useCallback(() => {
-    for (const url of attachmentUrlsRef.current) {
+  const releaseSelectedUrls = useCallback(() => {
+    for (const url of selectedUrlsRef.current) {
       URL.revokeObjectURL(url);
     }
-
-    attachmentUrlsRef.current = [];
+    selectedUrlsRef.current = [];
   }, []);
 
   useEffect(() => {
+    const objectUrls = allObjectUrlsRef.current;
+
     return () => {
-      releaseAttachmentUrls();
+      for (const url of objectUrls) {
+        URL.revokeObjectURL(url);
+      }
     };
-  }, [releaseAttachmentUrls]);
+  }, []);
 
   useEffect(() => {
-    if (phase !== "processing" || !plan) {
-      return;
-    }
+    const activeJob = jobs.find((job) => job.status === "processing");
 
-    if (activeStepIndex >= plan.steps.length) {
-      if (!completionMessageAddedRef.current) {
-        completionMessageAddedRef.current = true;
-        setPhase("complete");
-        setMessages((current) => [
-          ...current,
-          {
-            id: getMessageId("assistant-complete"),
-            role: "assistant",
-            text:
-              "The mock run is complete. I prepared the video, transcript, subtitles, document, and webpage artifacts below.",
-          },
-        ]);
+    if (!activeJob) {
+      const queuedJob = jobs.find((job) => job.status === "queued");
+
+      if (!queuedJob) {
+        return;
       }
 
+      const startTimer = window.setTimeout(() => {
+        setJobs((currentJobs) => {
+          const queuedIndex = currentJobs.findIndex(
+            (job) => job.status === "queued"
+          );
+
+          if (queuedIndex < 0) {
+            return currentJobs;
+          }
+
+          return currentJobs.map((job, index) =>
+            index === queuedIndex
+              ? {
+                  ...job,
+                  status: "processing",
+                  progress: 8,
+                  stage: getProcessingStage(8),
+                }
+              : job
+          );
+        });
+      }, 300);
+
+      return () => window.clearTimeout(startTimer);
+    }
+
+    const progressTimer = window.setInterval(() => {
+      setJobs((currentJobs) =>
+        currentJobs.map((job) => {
+          if (job.id !== activeJob.id || job.status !== "processing") {
+            return job;
+          }
+
+          const nextProgress = Math.min(100, job.progress + 8);
+
+          if (nextProgress >= 100) {
+            return {
+              ...job,
+              status: "ready",
+              progress: 100,
+              stage: READY_STAGE,
+            };
+          }
+
+          return {
+            ...job,
+            progress: nextProgress,
+            stage: getProcessingStage(nextProgress),
+          };
+        })
+      );
+    }, 650);
+
+    return () => window.clearInterval(progressTimer);
+  }, [jobs]);
+
+  function processFiles(files: File[]) {
+    if (files.length === 0) {
       return;
     }
 
-    const timer = window.setTimeout(() => {
-      setActiveStepIndex((current) => current + 1);
-    }, 850);
+    releaseSelectedUrls();
 
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [activeStepIndex, phase, plan]);
-
-  function appendMessages(nextMessages: ConversationMessage[]) {
-    setMessages((current) => [...current, ...nextMessages]);
-  }
-
-  function chooseVideos(event: ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(event.target.files ?? []);
     const prepared = prepareClientUploadFiles(files);
-    const nextAttachments = prepared.accepted.map((upload, index) => {
+    const nextSelections = prepared.accepted.map((upload, index) => {
       const previewUrl = URL.createObjectURL(upload.file);
 
       return {
@@ -799,238 +866,252 @@ function ChatTaskWorkspace() {
       };
     });
     const nextRejectedItems = prepared.rejected.map((item, index) => ({
-      id: `rejected-${item.filename}-${index}`,
+      id: `rejected-${item.filename}-${item.file.size}-${index}`,
       filename: item.filename,
       error: item.error,
     }));
+    const nextUrls = nextSelections.map((selection) => selection.previewUrl);
 
-    releaseAttachmentUrls();
-    attachmentUrlsRef.current = nextAttachments.map(
-      (attachment) => attachment.previewUrl
-    );
-
-    setAttachments(nextAttachments);
+    selectedUrlsRef.current = nextUrls;
+    allObjectUrlsRef.current.push(...nextUrls);
+    setSelectedUploads(nextSelections);
     setRejectedItems(nextRejectedItems);
+  }
+
+  function chooseVideos(event: ChangeEvent<HTMLInputElement>) {
+    processFiles(Array.from(event.target.files ?? []));
     event.target.value = "";
   }
 
-  function draftPlan(objective: string) {
-    const nextPlan = createMockPlan({
-      objective,
-      targetLanguage,
-      attachments,
-    });
-
-    setPlan(nextPlan);
-    setEditPlanText(nextPlan.objective);
-    setPhase("planned");
-    appendMessages([
-      {
-        id: getMessageId("assistant-plan"),
-        role: "assistant",
-        text:
-          "I drafted a structured plan. Review it, edit it if needed, then approve it to start the mock processing timeline.",
-      },
-    ]);
+  function handleDragEnter(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(true);
   }
 
-  function submitPrompt(event: FormEvent<HTMLFormElement>) {
+  function handleDragOver(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(true);
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(false);
+  }
+
+  function handleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDragging(false);
+    processFiles(Array.from(event.dataTransfer.files));
+  }
+
+  function generateMockJobs(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (phase === "clarifying") {
-      const answer = prompt.trim();
-
-      if (!answer) {
-        return;
-      }
-
-      setPrompt("");
-      appendMessages([
-        {
-          id: getMessageId("user-clarification"),
-          role: "user",
-          text: answer,
-        },
-      ]);
-      draftPlan(answer);
+    if (!canGenerate) {
       return;
     }
 
-    if (phase !== "idle" || attachments.length === 0) {
-      return;
-    }
+    const createdAt = Date.now();
+    const trimmedPrompt = prompt.trim();
+    const targetLanguageLabel = getTargetLanguageLabel(targetLanguage);
+    const nextJobs = selectedUploads.map((selection, index) => ({
+      id: `mock-job-${createdAt}-${index}-${selection.id}`,
+      filename: selection.filename,
+      contentType: selection.contentType,
+      size: selection.size,
+      previewUrl: selection.previewUrl,
+      prompt: trimmedPrompt,
+      targetLanguage,
+      targetLanguageLabel,
+      status: "queued" as const,
+      progress: 0,
+      stage: QUEUED_STAGE,
+      createdAt: createdAt + index,
+    }));
 
-    const userPrompt = prompt.trim();
-
+    selectedUrlsRef.current = [];
+    setJobs((currentJobs) => [...currentJobs, ...nextJobs]);
+    setSelectedUploads([]);
+    setRejectedItems([]);
     setPrompt("");
-    appendMessages([
-      {
-        id: getMessageId("user-upload"),
-        role: "user",
-        text:
-          userPrompt ||
-          "I uploaded these videos and need help deciding the best tutorial plan.",
-        attachments,
-      },
-    ]);
-
-    if (!userPrompt) {
-      setPhase("clarifying");
-      appendMessages([
-        {
-          id: getMessageId("assistant-question"),
-          role: "assistant",
-          text:
-            "What should the finished tutorial teach, and who is it for? A short answer is enough.",
-        },
-      ]);
-      return;
-    }
-
-    draftPlan(userPrompt);
   }
 
-  function startEditPlan() {
-    if (!plan) {
-      return;
-    }
-
-    setEditPlanText(plan.objective);
-    setPhase("editing");
+  function downloadVideo(job: MockJob) {
+    downloadFromUrl(job.previewUrl, `ai-edited-${job.filename}`);
   }
 
-  function savePlanEdit() {
-    if (!plan) {
-      return;
-    }
-
-    const nextObjective = editPlanText.trim() || plan.objective;
-
-    setPlan({
-      ...plan,
-      objective: nextObjective,
-    });
-    setEditPlanText(nextObjective);
-    setPhase("planned");
-    appendMessages([
-      {
-        id: getMessageId("assistant-edit"),
-        role: "assistant",
-        text: "Plan updated. Approve it when it matches the task.",
-      },
-    ]);
-  }
-
-  function approvePlan() {
-    if (!plan) {
-      return;
-    }
-
-    completionMessageAddedRef.current = false;
-    setPhase("processing");
-    setActiveStepIndex(0);
-    appendMessages([
-      {
-        id: getMessageId("assistant-approved"),
-        role: "assistant",
-        text: "Plan approved. I am starting the mock processing timeline now.",
-      },
-    ]);
+  function downloadInstructionPdf(job: MockJob) {
+    downloadBlob(
+      createMockInstructionPdf(job),
+      `${getBaseFilename(job.filename)}-instruction.pdf`
+    );
   }
 
   return (
-    <section className="flex min-h-screen flex-col bg-white text-black lg:h-screen lg:min-h-0">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-black/10 px-4 sm:px-6">
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md border border-black bg-black text-sm font-semibold text-white">
-            B
+    <main className="min-h-screen bg-[#f6f7fb] text-[#11131a]">
+      <header className="border-b border-[#d5dbe5] bg-white">
+        <div className="flex h-16 items-center justify-between px-5 sm:px-8">
+          <div className="flex min-w-0 items-center gap-4">
+            <LogoMark />
+            <div className="flex min-w-0 items-center gap-4">
+              <p className="truncate text-2xl font-bold tracking-tight text-[#11131a]">
+                Blooclip
+              </p>
+              <span className="hidden h-7 w-px bg-[#d5dbe5] sm:block" />
+              <p className="hidden text-base font-medium text-[#586273] sm:block">
+                AI video editor
+              </p>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-semibold tracking-tight">Blooclip</p>
-            <p className="text-xs text-black/45">AI-native mock workflow</p>
+
+          <div className="flex items-center gap-4">
+            <a
+              href="#processing-list"
+              className="hidden text-sm font-semibold text-[#11131a] transition hover:text-[#ee2b2f] sm:inline"
+            >
+              My projects
+            </a>
+            <button
+              type="button"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-[#aeb7c5] text-[#586273] transition hover:border-[#11131a] hover:text-[#11131a]"
+              aria-label="Help"
+            >
+              <HelpIcon className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-[#aeb7c5] text-[#586273] transition hover:border-[#11131a] hover:text-[#11131a]"
+              aria-label="Account"
+            >
+              <UserIcon className="h-5 w-5" />
+            </button>
           </div>
         </div>
-        <p className="text-xs font-medium text-black/45">No backend run</p>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-8">
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
-          {messages.map((message) => (
-            <ConversationMessageRow key={message.id} message={message} />
-          ))}
+      <section className="px-4 py-8 sm:px-6 sm:py-9">
+        <form
+          onSubmit={generateMockJobs}
+          className="mx-auto grid w-full max-w-[560px] gap-4"
+        >
+          <h1 className="text-center text-3xl font-bold tracking-tight text-[#11131a] sm:text-4xl">
+            Upload your video
+          </h1>
 
-          {rejectedItems.length > 0 && (
-            <div className="ml-0 max-w-[760px] sm:ml-10">
-              <RejectedFiles rejectedItems={rejectedItems} />
-            </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={UPLOAD_ACCEPT_ATTRIBUTE}
+            onChange={chooseVideos}
+            className="hidden"
+          />
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="inline-flex h-[70px] items-center justify-center gap-4 rounded-lg bg-[#ee2b2f] px-6 text-xl font-bold text-white shadow-lg shadow-red-600/20 transition hover:bg-[#d92327] focus:outline-none focus:ring-4 focus:ring-[#ee2b2f]/25"
+          >
+            <UploadIcon className="h-8 w-8" />
+            Choose video file
+          </button>
+
+          <label
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={cx(
+              "flex min-h-[70px] cursor-pointer items-center justify-center rounded-lg border border-dashed px-4 text-base font-medium transition",
+              isDragging
+                ? "border-[#ee2b2f] bg-red-50 text-[#ee2b2f]"
+                : "border-[#b9c2d0] bg-white/55 text-[#586273] hover:border-[#ee2b2f] hover:text-[#ee2b2f]"
+            )}
+          >
+            <input
+              type="file"
+              multiple
+              accept={UPLOAD_ACCEPT_ATTRIBUTE}
+              onChange={chooseVideos}
+              className="sr-only"
+            />
+            Drop video here
+          </label>
+
+          <SelectedFiles selections={selectedUploads} />
+
+          {selectedUploads.length > 0 && (
+            <p className="text-center text-sm font-medium text-[#586273]">
+              Selected total: {formatFileSize(selectedTotalSize)}
+            </p>
           )}
 
-          {attachments.length > 0 && phase === "idle" && (
-            <div className="ml-0 max-w-[760px] rounded-md border border-black/10 bg-white p-4 shadow-sm shadow-black/[0.02] sm:ml-10">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold">Ready to send</p>
-                  <p className="mt-1 text-sm text-black/50">
-                    {attachments.length} {pluralizeVideo(attachments.length)} ·{" "}
-                    {formatFileSize(totalSize)}
-                  </p>
-                </div>
-                <span className="rounded border border-black/10 px-2 py-1 text-xs font-medium text-black/55">
-                  Local files
-                </span>
-              </div>
-              <div className="mt-3 grid gap-2">
-                {attachments.map((attachment) => (
-                  <AttachmentCard key={attachment.id} attachment={attachment} />
+          <RejectedFiles rejectedItems={rejectedItems} />
+
+          <div className="grid gap-2 text-left">
+            <label
+              htmlFor="prompt"
+              className="text-base font-bold text-[#11131a]"
+            >
+              Prompt
+            </label>
+            <textarea
+              id="prompt"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              rows={4}
+              required
+              placeholder="Describe what you want Blooclip to create..."
+              className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5"
+            />
+          </div>
+
+          <div className="grid gap-2 text-left">
+            <label
+              htmlFor="target-language"
+              className="text-base font-bold text-[#11131a]"
+            >
+              Target language
+            </label>
+            <div className="relative">
+              <GlobeIcon className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#586273]" />
+              <select
+                id="target-language"
+                value={targetLanguage}
+                onChange={(event) => setTargetLanguage(event.target.value)}
+                className="h-[52px] w-full appearance-none rounded-lg border border-[#c5ccd8] bg-white px-12 text-base font-medium text-[#11131a] outline-none transition focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5"
+              >
+                {TARGET_LANGUAGE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
                 ))}
-              </div>
+              </select>
+              <ChevronDownIcon className="pointer-events-none absolute right-4 top-1/2 h-5 w-5 -translate-y-1/2 text-[#11131a]" />
             </div>
-          )}
+          </div>
 
-          {plan && (
-            <PlanCard
-              plan={plan}
-              phase={phase}
-              editPlanText={editPlanText}
-              onEditPlanTextChange={setEditPlanText}
-              onStartEdit={startEditPlan}
-              onSaveEdit={savePlanEdit}
-              onApprove={approvePlan}
-            />
-          )}
+          <button
+            type="submit"
+            disabled={!canGenerate}
+            className="mt-1 h-[52px] rounded-lg bg-[#090a0d] px-6 text-base font-bold text-white shadow-sm shadow-black/20 transition hover:bg-black focus:outline-none focus:ring-4 focus:ring-black/15 disabled:cursor-not-allowed disabled:bg-[#aeb7c5] disabled:shadow-none"
+          >
+            Generate
+          </button>
+        </form>
+      </section>
 
-          {plan && (phase === "processing" || phase === "complete") && (
-            <TimelineCard
-              steps={plan.steps}
-              activeStepIndex={activeStepIndex}
-            />
-          )}
-
-          {plan && phase === "complete" && (
-            <ArtifactCard plan={plan} firstAttachment={firstAttachment} />
-          )}
-        </div>
+      <div id="processing-list">
+        <ProcessingList
+          jobs={jobs}
+          onDownloadVideo={downloadVideo}
+          onDownloadPdf={downloadInstructionPdf}
+        />
       </div>
-
-      <Composer
-        prompt={prompt}
-        targetLanguage={targetLanguage}
-        attachmentCount={attachments.length}
-        totalSize={totalSize}
-        phase={phase}
-        onPromptChange={setPrompt}
-        onTargetLanguageChange={setTargetLanguage}
-        onChooseVideos={chooseVideos}
-        onSubmit={submitPrompt}
-      />
-    </section>
-  );
-}
-
-export function UploadWorkspace() {
-  return (
-    <main className="min-h-screen bg-white text-black lg:h-screen lg:overflow-hidden">
-      <ChatTaskWorkspace />
     </main>
   );
 }
