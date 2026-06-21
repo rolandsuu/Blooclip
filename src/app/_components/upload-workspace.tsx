@@ -1,14 +1,8 @@
 "use client";
 
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useMemo, useState } from "react";
 import type { ChangeEvent, DragEvent, FormEvent } from "react";
+import { useRouter } from "next/navigation";
 
 import {
   DEFAULT_TARGET_LANGUAGE,
@@ -27,31 +21,44 @@ type RejectedUploadItem = {
 
 type UploadSelection = PreparedClientUploadFile<File> & {
   id: string;
-  previewUrl: string;
 };
 
-type MockJobStatus = "queued" | "processing" | "ready" | "error";
+type UploadPhase = "creating" | "uploading" | "uploaded" | "queueing" | "failed";
 
-type MockJob = {
+type UploadProgressItem = {
   id: string;
+  videoId: string | null;
   filename: string;
   contentType: string;
   size: number;
-  previewUrl: string;
-  prompt: string;
-  targetLanguage: string;
-  targetLanguageLabel: string;
-  status: MockJobStatus;
+  phase: UploadPhase;
   progress: number;
-  stage: string;
-  createdAt: number;
+  message: string;
+};
+
+type UploadSessionVideo = {
+  videoId: string;
+  uploadUrl: string;
+  filename: string;
+  batchPosition: number | null;
+};
+
+type UploadSessionResponse = {
+  batchId: string;
+  statusUrl: string;
+  totalVideos: number;
+  videos: UploadSessionVideo[];
+};
+
+type UploadResult = {
+  ok: boolean;
+  selectionId: string;
 };
 
 const UPLOAD_ACCEPT_ATTRIBUTE =
   "video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov";
 
-const READY_STAGE = "Completed";
-const QUEUED_STAGE = "Waiting to start";
+const R2_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -69,65 +76,277 @@ function getUploadItemId(file: File, index: number) {
   return `${file.name}-${file.size}-${file.lastModified}-${index}`;
 }
 
-function getBaseFilename(filename: string) {
-  const dotIndex = filename.lastIndexOf(".");
-
-  if (dotIndex <= 0) {
-    return filename || "blooclip-video";
-  }
-
-  return filename.slice(0, dotIndex);
+function getErrorMessage(error: unknown, fallback = "Upload failed") {
+  return error instanceof Error ? error.message : fallback;
 }
 
-function getTargetLanguageLabel(value: string) {
-  return (
-    TARGET_LANGUAGE_OPTIONS.find((option) => option.value === value)?.label ??
-    value
+async function readErrorMessage(response: Response, fallback: string) {
+  const text = await response.text().catch(() => "");
+
+  if (!text) {
+    return fallback;
+  }
+
+  try {
+    const data = JSON.parse(text) as { error?: unknown };
+
+    if (typeof data.error === "string" && data.error.trim()) {
+      return data.error;
+    }
+  } catch {
+    return text;
+  }
+
+  return fallback;
+}
+
+function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Create upload response was invalid");
+  }
+
+  const data = value as {
+    batchId?: unknown;
+    statusUrl?: unknown;
+    totalVideos?: unknown;
+    videos?: unknown;
+  };
+
+  if (
+    typeof data.batchId !== "string" ||
+    typeof data.statusUrl !== "string" ||
+    typeof data.totalVideos !== "number" ||
+    !Array.isArray(data.videos)
+  ) {
+    throw new Error("Create upload response was invalid");
+  }
+
+  const videos = data.videos.map((video) => {
+    if (typeof video !== "object" || video === null) {
+      throw new Error("Create upload response included an invalid video");
+    }
+
+    const upload = video as {
+      videoId?: unknown;
+      uploadUrl?: unknown;
+      filename?: unknown;
+      batchPosition?: unknown;
+    };
+
+    if (
+      typeof upload.videoId !== "string" ||
+      typeof upload.uploadUrl !== "string" ||
+      typeof upload.filename !== "string" ||
+      !(
+        typeof upload.batchPosition === "number" ||
+        upload.batchPosition === null
+      )
+    ) {
+      throw new Error("Create upload response included an invalid video");
+    }
+
+    return {
+      videoId: upload.videoId,
+      uploadUrl: upload.uploadUrl,
+      filename: upload.filename,
+      batchPosition: upload.batchPosition,
+    };
+  });
+
+  return {
+    batchId: data.batchId,
+    statusUrl: data.statusUrl,
+    totalVideos: data.totalVideos,
+    videos,
+  };
+}
+
+function getSafeStatusUrl(session: UploadSessionResponse) {
+  const expectedStatusUrl = `/video-batches/${session.batchId}`;
+
+  if (session.statusUrl === expectedStatusUrl) {
+    return session.statusUrl;
+  }
+
+  return `/video-batches/${encodeURIComponent(session.batchId)}`;
+}
+
+async function createUploadSession(
+  selectedUploads: UploadSelection[],
+  prompt: string,
+  targetLanguage: string
+) {
+  const response = await fetch("/api/video-batches/create-upload", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      targetLanguage,
+      prompt,
+      videos: selectedUploads.map((selection) => ({
+        filename: selection.filename,
+        contentType: selection.contentType,
+        size: selection.size,
+      })),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to create upload session")
+    );
+  }
+
+  const session = parseUploadSessionResponse(await response.json());
+
+  if (session.videos.length !== selectedUploads.length) {
+    throw new Error("Create upload response did not match selected videos");
+  }
+
+  return session;
+}
+
+function uploadFileToR2({
+  uploadUrl,
+  file,
+  contentType,
+  onProgress,
+}: {
+  uploadUrl: string;
+  file: File;
+  contentType: string;
+  onProgress(progress: number): void;
+}) {
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.open("PUT", uploadUrl);
+    xhr.timeout = R2_UPLOAD_TIMEOUT_MS;
+    xhr.setRequestHeader("Content-Type", contentType);
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total <= 0) {
+        onProgress(1);
+        return;
+      }
+
+      onProgress(
+        Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100)))
+      );
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(100);
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          xhr.statusText
+            ? `R2 upload failed with status ${xhr.status}: ${xhr.statusText}`
+            : `R2 upload failed with status ${xhr.status}`
+        )
+      );
+    };
+
+    xhr.onerror = () => {
+      reject(new Error("Network error while uploading to R2"));
+    };
+
+    xhr.ontimeout = () => {
+      reject(
+        new Error(
+          "Upload to R2 timed out. Try a smaller file or a faster connection."
+        )
+      );
+    };
+
+    xhr.onabort = () => {
+      reject(new Error("Upload to R2 was canceled"));
+    };
+
+    xhr.send(file);
+  });
+}
+
+async function markUploadFailed(videoId: string, error: string) {
+  const response = await fetch(
+    `/api/videos/${encodeURIComponent(videoId)}/upload-failed`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ error }),
+    }
   );
-}
 
-function getProcessingStage(progress: number) {
-  if (progress < 30) return "Analyzing video";
-  if (progress < 55) return "Writing edit plan";
-  if (progress < 78) return "Rendering AI edit";
-  if (progress < 94) return "Building instruction PDF";
-  return "Finalizing downloads";
-}
-
-function getStatusLabel(status: MockJobStatus) {
-  switch (status) {
-    case "queued":
-      return "Queued";
-    case "processing":
-      return "Processing";
-    case "ready":
-      return "Ready";
-    case "error":
-      return "Error";
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to mark upload failed")
+    );
   }
 }
 
-function getStatusClasses(status: MockJobStatus) {
-  switch (status) {
-    case "queued":
+async function completeBatchUpload(batchId: string, prompt: string) {
+  const response = await fetch(
+    `/api/video-batches/${encodeURIComponent(batchId)}/complete-upload`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ prompt }),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(response, "Failed to start AI processing")
+    );
+  }
+}
+
+function getPhaseLabel(phase: UploadPhase) {
+  switch (phase) {
+    case "creating":
+      return "Creating";
+    case "uploading":
+      return "Uploading";
+    case "uploaded":
+      return "Uploaded";
+    case "queueing":
+      return "Queueing";
+    case "failed":
+      return "Failed";
+  }
+}
+
+function getPhaseClasses(phase: UploadPhase) {
+  switch (phase) {
+    case "creating":
       return {
         dot: "bg-[#ff9f0a]",
         text: "text-[#b76a00]",
         bar: "bg-[#ff9f0a]",
       };
-    case "processing":
+    case "uploading":
       return {
         dot: "processing-dot-pulse bg-[#155dfc]",
         text: "text-[#155dfc]",
         bar: "bg-[#155dfc]",
       };
-    case "ready":
+    case "uploaded":
+    case "queueing":
       return {
         dot: "bg-[#20a03f]",
         text: "text-[#198a35]",
         bar: "bg-[#20a03f]",
       };
-    case "error":
+    case "failed":
       return {
         dot: "bg-[#e92b2b]",
         text: "text-[#c81818]",
@@ -136,197 +355,20 @@ function getStatusClasses(status: MockJobStatus) {
   }
 }
 
-function toPdfText(value: string) {
-  return value
-    .replace(/[^\x20-\x7E]/g, "?")
-    .replace(/\\/g, "\\\\")
-    .replace(/\(/g, "\\(")
-    .replace(/\)/g, "\\)");
-}
-
-function wrapText(value: string, maxLength = 72) {
-  const normalized = value.replace(/\s+/g, " ").trim();
-
-  if (!normalized) {
-    return ["No prompt provided."];
+function getSubmitLabel(uploadItems: UploadProgressItem[]) {
+  if (uploadItems.some((item) => item.phase === "creating")) {
+    return "Creating upload...";
   }
 
-  const lines: string[] = [];
-  let currentLine = "";
-
-  for (const word of normalized.split(" ")) {
-    if (!currentLine) {
-      currentLine = word;
-      continue;
-    }
-
-    if (`${currentLine} ${word}`.length > maxLength) {
-      lines.push(currentLine);
-      currentLine = word;
-      continue;
-    }
-
-    currentLine = `${currentLine} ${word}`;
+  if (uploadItems.some((item) => item.phase === "uploading")) {
+    return "Uploading...";
   }
 
-  if (currentLine) {
-    lines.push(currentLine);
+  if (uploadItems.some((item) => item.phase === "queueing")) {
+    return "Starting AI processing...";
   }
 
-  return lines.slice(0, 5);
-}
-
-function buildPdfDocument(content: string) {
-  const encoder = new TextEncoder();
-  const contentLength = encoder.encode(content).length;
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${contentLength} >>\nstream\n${content}\nendstream`,
-  ];
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
-
-  objects.forEach((object, index) => {
-    offsets.push(encoder.encode(pdf).length);
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  });
-
-  const xrefOffset = encoder.encode(pdf).length;
-  pdf += `xref\n0 ${objects.length + 1}\n`;
-  pdf += "0000000000 65535 f \n";
-  for (const offset of offsets.slice(1)) {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  }
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
-  pdf += `startxref\n${xrefOffset}\n%%EOF`;
-
-  return pdf;
-}
-
-function createMockInstructionPdf(job: MockJob) {
-  const promptLines = wrapText(job.prompt);
-  const textLines = [
-    { x: 72, y: 720, size: 24, text: "Blooclip Instruction PDF" },
-    { x: 72, y: 690, size: 12, text: `Video: ${job.filename}` },
-    {
-      x: 72,
-      y: 670,
-      size: 12,
-      text: `Target language: ${job.targetLanguageLabel}`,
-    },
-    { x: 72, y: 642, size: 14, text: "Instruction" },
-    ...promptLines.map((line, index) => ({
-      x: 72,
-      y: 620 - index * 18,
-      size: 11,
-      text: line,
-    })),
-    { x: 72, y: 500, size: 14, text: "Screenshot guide" },
-    { x: 72, y: 344, size: 11, text: "Screenshot 1: key action frame" },
-    { x: 320, y: 344, size: 11, text: "Screenshot 2: final result frame" },
-    { x: 72, y: 274, size: 14, text: "Steps" },
-    {
-      x: 72,
-      y: 250,
-      size: 11,
-      text: "1. Review the source video and find the key action.",
-    },
-    {
-      x: 72,
-      y: 232,
-      size: 11,
-      text: "2. Edit a concise AI video with voiceover and subtitles.",
-    },
-    {
-      x: 72,
-      y: 214,
-      size: 11,
-      text: "3. Use the screenshots to repeat the process.",
-    },
-  ];
-  const textCommands = textLines
-    .map(
-      (line) =>
-        `/F1 ${line.size} Tf 1 0 0 1 ${line.x} ${line.y} Tm (${toPdfText(
-          line.text
-        )}) Tj`
-    )
-    .join("\n");
-  const content = [
-    "q 0.95 0.96 0.98 rg 72 370 210 112 re f Q",
-    "q 0.78 0.81 0.87 RG 72 370 210 112 re S Q",
-    "q 0.12 0.14 0.18 rg 96 398 162 52 re f Q",
-    "q 0.95 0.96 0.98 rg 320 370 210 112 re f Q",
-    "q 0.78 0.81 0.87 RG 320 370 210 112 re S Q",
-    "q 0.88 0.18 0.18 rg 344 398 162 52 re f Q",
-    "BT",
-    textCommands,
-    "ET",
-  ].join("\n");
-
-  return new Blob([buildPdfDocument(content)], { type: "application/pdf" });
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function downloadFromUrl(url: string, filename: string) {
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
-function DownloadIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-      aria-hidden="true"
-    >
-      <path d="M12 3v12" />
-      <path d="m7 10 5 5 5-5" />
-      <path d="M5 21h14" />
-    </svg>
-  );
-}
-
-function PdfIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      aria-hidden="true"
-    >
-      <path d="M7 3h7l4 4v14H7z" />
-      <path d="M14 3v5h4" />
-      <path d="M9 14h6" />
-      <path d="M9 17h4" />
-    </svg>
-  );
+  return "Working...";
 }
 
 function GlobeIcon({ className }: { className?: string }) {
@@ -441,6 +483,16 @@ function RejectedFiles({ rejectedItems }: { rejectedItems: RejectedUploadItem[] 
   );
 }
 
+function FileThumb() {
+  return (
+    <div className="relative h-[58px] w-[70px] shrink-0 overflow-hidden rounded-lg bg-[#eef1f6]">
+      <div className="absolute inset-0 flex items-center justify-center">
+        <PlayIcon className="h-7 w-7 text-[#11131a]" />
+      </div>
+    </div>
+  );
+}
+
 function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
   if (selections.length === 0) {
     return null;
@@ -475,251 +527,78 @@ function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
   );
 }
 
-function DocumentPreview() {
-  return (
-    <div className="hidden w-[92px] shrink-0 rounded-md border border-[#d6dce7] bg-white p-2 shadow-sm shadow-black/[0.03] lg:block">
-      <div className="mb-2 h-1.5 w-11 rounded bg-[#1f2430]" />
-      <div className="mb-1 h-1 w-16 rounded bg-[#d7dce5]" />
-      <div className="mb-3 h-1 w-12 rounded bg-[#d7dce5]" />
-      <div className="grid grid-cols-2 gap-1.5">
-        <div className="aspect-video rounded-sm bg-[#eef1f6]">
-          <div className="mx-auto mt-2 h-3 w-4 rounded-sm bg-[#ee2b2f]" />
-        </div>
-        <div className="aspect-video rounded-sm bg-[#eef1f6]">
-          <div className="mx-auto mt-2 h-3 w-4 rounded-sm bg-[#11131a]" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FileThumb() {
-  return (
-    <div className="relative h-[58px] w-[70px] shrink-0 overflow-hidden rounded-lg bg-[#eef1f6]">
-      <div className="absolute inset-0 flex items-center justify-center">
-        <PlayIcon className="h-7 w-7 text-[#11131a]" />
-      </div>
-    </div>
-  );
-}
-
-function ProgressCell({ job }: { job: MockJob }) {
-  const tone = getStatusClasses(job.status);
-
-  return (
-    <div className="grid grid-cols-[44px_1fr] items-center gap-3">
-      <span className="font-mono text-sm font-semibold text-[#11131a]">
-        {job.status === "queued" ? "-" : `${job.progress}%`}
-      </span>
-      <div className="h-2 overflow-hidden rounded-full bg-[#e2e6ed]">
-        <div
-          className={cx("h-full rounded-full transition-all duration-500", tone.bar)}
-          style={{ width: `${job.status === "queued" ? 0 : job.progress}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function StatusCell({ job }: { job: MockJob }) {
-  const tone = getStatusClasses(job.status);
-
-  return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-2">
-        <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
-        <span className={cx("text-sm font-semibold", tone.text)}>
-          {getStatusLabel(job.status)}
-        </span>
-      </div>
-      <p className="mt-1 truncate text-sm text-[#6f7785]">{job.stage}</p>
-    </div>
-  );
-}
-
-function ResultActions({
-  job,
-  onDownloadVideo,
-  onDownloadPdf,
-}: {
-  job: MockJob;
-  onDownloadVideo(job: MockJob): void;
-  onDownloadPdf(job: MockJob): void;
-}) {
-  if (job.status !== "ready") {
-    return <span className="text-sm text-[#6f7785]">-</span>;
+function UploadProgressList({ items }: { items: UploadProgressItem[] }) {
+  if (items.length === 0) {
+    return null;
   }
 
   return (
-    <div className="flex min-w-[260px] items-center justify-end gap-4">
-      <DocumentPreview />
-      <div className="grid min-w-[220px] gap-2">
-        <button
-          type="button"
-          onClick={() => onDownloadVideo(job)}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white shadow-sm shadow-red-600/20 transition hover:bg-[#d92327] focus:outline-none focus:ring-2 focus:ring-[#ee2b2f]/30"
-        >
-          <DownloadIcon className="h-4 w-4" />
-          Download AI-edited video
-        </button>
-        <button
-          type="button"
-          onClick={() => onDownloadPdf(job)}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#ee2b2f] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-[#ee2b2f]/25"
-        >
-          <PdfIcon className="h-4 w-4 text-[#ee2b2f]" />
-          Download instruction PDF
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function JobDesktopRow({
-  job,
-  onDownloadVideo,
-  onDownloadPdf,
-}: {
-  job: MockJob;
-  onDownloadVideo(job: MockJob): void;
-  onDownloadPdf(job: MockJob): void;
-}) {
-  return (
-    <li className="hidden grid-cols-[260px_250px_120px_190px_210px_1fr] items-center gap-5 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid">
-      <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
-        <FileThumb />
-        <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-[#11131a]">
-            {job.filename}
-          </p>
-          <p className="mt-1 text-sm text-[#6f7785]">{formatFileSize(job.size)}</p>
-        </div>
-      </div>
-      <p className="line-clamp-2 text-sm leading-5 text-[#11131a]">{job.prompt}</p>
-      <p className="text-sm text-[#11131a]">{job.targetLanguageLabel}</p>
-      <StatusCell job={job} />
-      <ProgressCell job={job} />
-      <ResultActions
-        job={job}
-        onDownloadVideo={onDownloadVideo}
-        onDownloadPdf={onDownloadPdf}
-      />
-    </li>
-  );
-}
-
-function JobMobileCard({
-  job,
-  onDownloadVideo,
-  onDownloadPdf,
-}: {
-  job: MockJob;
-  onDownloadVideo(job: MockJob): void;
-  onDownloadPdf(job: MockJob): void;
-}) {
-  return (
-    <li className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:hidden">
-      <div className="grid grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
-        <FileThumb />
-        <div className="min-w-0">
-          <p className="truncate text-sm font-bold text-[#11131a]">
-            {job.filename}
-          </p>
-          <p className="mt-1 text-sm text-[#6f7785]">
-            {formatFileSize(job.size)} · {job.targetLanguageLabel}
-          </p>
-        </div>
-      </div>
-      <p className="text-sm leading-5 text-[#11131a]">{job.prompt}</p>
-      <StatusCell job={job} />
-      <ProgressCell job={job} />
-      {job.status === "ready" ? (
-        <div className="grid gap-2">
-          <button
-            type="button"
-            onClick={() => onDownloadVideo(job)}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white"
-          >
-            <DownloadIcon className="h-4 w-4" />
-            Download AI-edited video
-          </button>
-          <button
-            type="button"
-            onClick={() => onDownloadPdf(job)}
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-[#ee2b2f] bg-white px-3 text-sm font-semibold text-[#11131a]"
-          >
-            <PdfIcon className="h-4 w-4 text-[#ee2b2f]" />
-            Download instruction PDF
-          </button>
-        </div>
-      ) : (
-        <p className="text-sm text-[#6f7785]">Result will appear here.</p>
-      )}
-    </li>
-  );
-}
-
-function ProcessingList({
-  jobs,
-  onDownloadVideo,
-  onDownloadPdf,
-}: {
-  jobs: MockJob[];
-  onDownloadVideo(job: MockJob): void;
-  onDownloadPdf(job: MockJob): void;
-}) {
-  const sortedJobs = useMemo(
-    () => [...jobs].sort((a, b) => a.createdAt - b.createdAt),
-    [jobs]
-  );
-
-  return (
-    <section className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8">
-      <div className="mx-auto max-w-[1500px]">
+    <section
+      id="upload-progress"
+      className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8"
+    >
+      <div className="mx-auto max-w-[1100px]">
         <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
-          Processing
+          Upload progress
         </h2>
 
         <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
-          <div className="hidden grid-cols-[260px_250px_120px_190px_210px_1fr] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
+          <div className="hidden grid-cols-[minmax(0,1fr)_180px_210px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
             <span>Video</span>
-            <span>Prompt</span>
-            <span>Language</span>
             <span>Status</span>
             <span>Progress</span>
-            <span>Result</span>
           </div>
 
-          {sortedJobs.length > 0 ? (
-            <ul aria-live="polite">
-              {sortedJobs.map((job) => (
-                <Fragment key={job.id}>
-                  <JobDesktopRow
-                    job={job}
-                    onDownloadVideo={onDownloadVideo}
-                    onDownloadPdf={onDownloadPdf}
-                  />
-                  <JobMobileCard
-                    job={job}
-                    onDownloadVideo={onDownloadVideo}
-                    onDownloadPdf={onDownloadPdf}
-                  />
-                </Fragment>
-              ))}
-            </ul>
-          ) : (
-            <div className="grid min-h-[180px] place-items-center px-4 py-10 text-center">
-              <div>
-                <p className="text-base font-semibold text-[#11131a]">
-                  No videos are processing yet.
-                </p>
-                <p className="mt-2 text-sm text-[#6f7785]">
-                  Upload a video, write a prompt, choose a language, and click
-                  Generate.
-                </p>
-              </div>
-            </div>
-          )}
+          <ul aria-live="polite">
+            {items.map((item) => {
+              const tone = getPhaseClasses(item.phase);
+              const progress = Math.max(0, Math.min(100, item.progress));
+
+              return (
+                <li
+                  key={item.id}
+                  className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px_210px] md:items-center md:gap-5"
+                >
+                  <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
+                    <FileThumb />
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-[#11131a]">
+                        {item.filename}
+                      </p>
+                      <p className="mt-1 text-sm text-[#6f7785]">
+                        {formatFileSize(item.size)} · {item.contentType}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
+                      <span className={cx("text-sm font-semibold", tone.text)}>
+                        {getPhaseLabel(item.phase)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-[#6f7785]">{item.message}</p>
+                  </div>
+
+                  <div className="grid grid-cols-[44px_1fr] items-center gap-3">
+                    <span className="font-mono text-sm font-semibold text-[#11131a]">
+                      {item.phase === "creating" ? "-" : `${progress}%`}
+                    </span>
+                    <div className="h-2 overflow-hidden rounded-full bg-[#e2e6ed]">
+                      <div
+                        className={cx(
+                          "h-full rounded-full transition-all duration-500",
+                          tone.bar
+                        )}
+                        style={{ width: `${item.phase === "creating" ? 0 : progress}%` }}
+                      />
+                    </div>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </div>
       </div>
     </section>
@@ -727,135 +606,61 @@ function ProcessingList({
 }
 
 export function UploadWorkspace() {
+  const router = useRouter();
   const [prompt, setPrompt] = useState("");
   const [targetLanguage, setTargetLanguage] = useState<string>(
     DEFAULT_TARGET_LANGUAGE
   );
   const [selectedUploads, setSelectedUploads] = useState<UploadSelection[]>([]);
   const [rejectedItems, setRejectedItems] = useState<RejectedUploadItem[]>([]);
-  const [jobs, setJobs] = useState<MockJob[]>([]);
+  const [uploadItems, setUploadItems] = useState<UploadProgressItem[]>([]);
+  const [formError, setFormError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const selectedUrlsRef = useRef<string[]>([]);
-  const allObjectUrlsRef = useRef<string[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const selectedTotalSize = useMemo(
     () => selectedUploads.reduce((total, item) => total + item.size, 0),
     [selectedUploads]
   );
   const canGenerate =
-    selectedUploads.length > 0 && prompt.trim().length > 0;
+    selectedUploads.length > 0 && prompt.trim().length > 0 && !isSubmitting;
 
-  const releaseSelectedUrls = useCallback(() => {
-    for (const url of selectedUrlsRef.current) {
-      URL.revokeObjectURL(url);
-    }
-    selectedUrlsRef.current = [];
-  }, []);
-
-  useEffect(() => {
-    const objectUrls = allObjectUrlsRef.current;
-
-    return () => {
-      for (const url of objectUrls) {
-        URL.revokeObjectURL(url);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const activeJob = jobs.find((job) => job.status === "processing");
-
-    if (!activeJob) {
-      const queuedJob = jobs.find((job) => job.status === "queued");
-
-      if (!queuedJob) {
-        return;
-      }
-
-      const startTimer = window.setTimeout(() => {
-        setJobs((currentJobs) => {
-          const queuedIndex = currentJobs.findIndex(
-            (job) => job.status === "queued"
-          );
-
-          if (queuedIndex < 0) {
-            return currentJobs;
-          }
-
-          return currentJobs.map((job, index) =>
-            index === queuedIndex
-              ? {
-                  ...job,
-                  status: "processing",
-                  progress: 8,
-                  stage: getProcessingStage(8),
-                }
-              : job
-          );
-        });
-      }, 300);
-
-      return () => window.clearTimeout(startTimer);
-    }
-
-    const progressTimer = window.setInterval(() => {
-      setJobs((currentJobs) =>
-        currentJobs.map((job) => {
-          if (job.id !== activeJob.id || job.status !== "processing") {
-            return job;
-          }
-
-          const nextProgress = Math.min(100, job.progress + 8);
-
-          if (nextProgress >= 100) {
-            return {
-              ...job,
-              status: "ready",
-              progress: 100,
-              stage: READY_STAGE,
-            };
-          }
-
-          return {
-            ...job,
-            progress: nextProgress,
-            stage: getProcessingStage(nextProgress),
-          };
-        })
-      );
-    }, 650);
-
-    return () => window.clearInterval(progressTimer);
-  }, [jobs]);
+  function updateUploadItem(
+    id: string,
+    values: Partial<Omit<UploadProgressItem, "id">>
+  ) {
+    setUploadItems((currentItems) =>
+      currentItems.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              ...values,
+            }
+          : item
+      )
+    );
+  }
 
   function processFiles(files: File[]) {
-    if (files.length === 0) {
+    if (files.length === 0 || isSubmitting) {
       return;
     }
 
-    releaseSelectedUrls();
-
     const prepared = prepareClientUploadFiles(files);
-    const nextSelections = prepared.accepted.map((upload, index) => {
-      const previewUrl = URL.createObjectURL(upload.file);
-
-      return {
-        ...upload,
-        id: getUploadItemId(upload.file, index),
-        previewUrl,
-      };
-    });
+    const nextSelections = prepared.accepted.map((upload, index) => ({
+      ...upload,
+      id: getUploadItemId(upload.file, index),
+    }));
     const nextRejectedItems = prepared.rejected.map((item, index) => ({
       id: `rejected-${item.filename}-${item.file.size}-${index}`,
       filename: item.filename,
       error: item.error,
     }));
-    const nextUrls = nextSelections.map((selection) => selection.previewUrl);
 
-    selectedUrlsRef.current = nextUrls;
-    allObjectUrlsRef.current.push(...nextUrls);
     setSelectedUploads(nextSelections);
     setRejectedItems(nextRejectedItems);
+    setUploadItems([]);
+    setFormError(null);
   }
 
   function chooseVideos(event: ChangeEvent<HTMLInputElement>) {
@@ -866,13 +671,19 @@ export function UploadWorkspace() {
   function handleDragEnter(event: DragEvent<HTMLLabelElement>) {
     event.preventDefault();
     event.stopPropagation();
-    setIsDragging(true);
+
+    if (!isSubmitting) {
+      setIsDragging(true);
+    }
   }
 
   function handleDragOver(event: DragEvent<HTMLLabelElement>) {
     event.preventDefault();
     event.stopPropagation();
-    setIsDragging(true);
+
+    if (!isSubmitting) {
+      setIsDragging(true);
+    }
   }
 
   function handleDragLeave(event: DragEvent<HTMLLabelElement>) {
@@ -888,47 +699,135 @@ export function UploadWorkspace() {
     processFiles(Array.from(event.dataTransfer.files));
   }
 
-  function generateMockJobs(event: FormEvent<HTMLFormElement>) {
+  async function uploadSelection(
+    selection: UploadSelection,
+    upload: UploadSessionVideo
+  ): Promise<UploadResult> {
+    updateUploadItem(selection.id, {
+      videoId: upload.videoId,
+      phase: "uploading",
+      progress: 0,
+      message: "Uploading to storage",
+    });
+
+    try {
+      await uploadFileToR2({
+        uploadUrl: upload.uploadUrl,
+        file: selection.file,
+        contentType: selection.contentType,
+        onProgress: (progress) =>
+          updateUploadItem(selection.id, {
+            progress,
+            message: progress >= 100 ? "Upload finished" : "Uploading to storage",
+          }),
+      });
+
+      updateUploadItem(selection.id, {
+        phase: "uploaded",
+        progress: 100,
+        message: "Upload finished",
+      });
+
+      return {
+        ok: true,
+        selectionId: selection.id,
+      };
+    } catch (error) {
+      let message = getErrorMessage(error, "Upload to R2 failed");
+
+      try {
+        await markUploadFailed(upload.videoId, message);
+      } catch (markError) {
+        message = `${message}. ${getErrorMessage(
+          markError,
+          "Failed to mark upload failed"
+        )}`;
+      }
+
+      updateUploadItem(selection.id, {
+        videoId: upload.videoId,
+        phase: "failed",
+        message,
+      });
+
+      return {
+        ok: false,
+        selectionId: selection.id,
+      };
+    }
+  }
+
+  async function submitUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (!canGenerate) {
       return;
     }
 
-    const createdAt = Date.now();
     const trimmedPrompt = prompt.trim();
-    const targetLanguageLabel = getTargetLanguageLabel(targetLanguage);
-    const nextJobs = selectedUploads.map((selection, index) => ({
-      id: `mock-job-${createdAt}-${index}-${selection.id}`,
-      filename: selection.filename,
-      contentType: selection.contentType,
-      size: selection.size,
-      previewUrl: selection.previewUrl,
-      prompt: trimmedPrompt,
-      targetLanguage,
-      targetLanguageLabel,
-      status: "queued" as const,
-      progress: 0,
-      stage: QUEUED_STAGE,
-      createdAt: createdAt + index,
-    }));
+    const uploads = selectedUploads;
 
-    selectedUrlsRef.current = [];
-    setJobs((currentJobs) => [...currentJobs, ...nextJobs]);
-    setSelectedUploads([]);
+    setIsSubmitting(true);
+    setFormError(null);
     setRejectedItems([]);
-    setPrompt("");
-  }
-
-  function downloadVideo(job: MockJob) {
-    downloadFromUrl(job.previewUrl, `ai-edited-${job.filename}`);
-  }
-
-  function downloadInstructionPdf(job: MockJob) {
-    downloadBlob(
-      createMockInstructionPdf(job),
-      `${getBaseFilename(job.filename)}-instruction.pdf`
+    setUploadItems(
+      uploads.map((selection) => ({
+        id: selection.id,
+        videoId: null,
+        filename: selection.filename,
+        contentType: selection.contentType,
+        size: selection.size,
+        phase: "creating",
+        progress: 0,
+        message: "Preparing upload URL",
+      }))
     );
+
+    try {
+      const session = await createUploadSession(
+        uploads,
+        trimmedPrompt,
+        targetLanguage
+      );
+      const uploadResults = await Promise.all(
+        session.videos.map((upload, index) => {
+          const selection = uploads[index];
+
+          if (!selection) {
+            return Promise.resolve({
+              ok: false,
+              selectionId: upload.videoId,
+            });
+          }
+
+          return uploadSelection(selection, upload);
+        })
+      );
+      const uploadedIds = new Set(
+        uploadResults
+          .filter((result) => result.ok)
+          .map((result) => result.selectionId)
+      );
+
+      setUploadItems((currentItems) =>
+        currentItems.map((item) =>
+          uploadedIds.has(item.id)
+            ? {
+                ...item,
+                phase: "queueing",
+                progress: 100,
+                message: "Starting AI processing",
+              }
+            : item
+        )
+      );
+
+      await completeBatchUpload(session.batchId, trimmedPrompt);
+      router.push(getSafeStatusUrl(session));
+    } catch (error) {
+      setFormError(getErrorMessage(error));
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -950,10 +849,10 @@ export function UploadWorkspace() {
 
           <div className="flex items-center gap-4">
             <a
-              href="#processing-list"
+              href="#upload-progress"
               className="hidden text-sm font-semibold text-[#11131a] transition hover:text-[#ee2b2f] sm:inline"
             >
-              My projects
+              Upload progress
             </a>
             <button
               type="button"
@@ -975,7 +874,7 @@ export function UploadWorkspace() {
 
       <section className="px-4 py-8 sm:px-6 sm:py-9">
         <form
-          onSubmit={generateMockJobs}
+          onSubmit={submitUpload}
           className="mx-auto grid w-full max-w-[560px] gap-4"
         >
           <h1 className="text-center text-3xl font-bold tracking-tight text-[#11131a] sm:text-4xl">
@@ -988,10 +887,12 @@ export function UploadWorkspace() {
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             className={cx(
-              "flex min-h-[70px] cursor-pointer items-center justify-center rounded-lg border border-dashed px-4 text-base font-medium transition",
-              isDragging
-                ? "border-[#ee2b2f] bg-red-50 text-[#ee2b2f]"
-                : "border-[#b9c2d0] bg-white/55 text-[#586273] hover:border-[#ee2b2f] hover:text-[#ee2b2f]"
+              "flex min-h-[70px] items-center justify-center rounded-lg border border-dashed px-4 text-base font-medium transition",
+              isSubmitting
+                ? "cursor-not-allowed border-[#cbd2dd] bg-[#eef1f6] text-[#8a93a3]"
+                : isDragging
+                  ? "cursor-pointer border-[#ee2b2f] bg-red-50 text-[#ee2b2f]"
+                  : "cursor-pointer border-[#b9c2d0] bg-white/55 text-[#586273] hover:border-[#ee2b2f] hover:text-[#ee2b2f]"
             )}
           >
             <input
@@ -999,6 +900,7 @@ export function UploadWorkspace() {
               multiple
               accept={UPLOAD_ACCEPT_ATTRIBUTE}
               onChange={chooseVideos}
+              disabled={isSubmitting}
               className="sr-only"
             />
             Drop video here
@@ -1014,6 +916,15 @@ export function UploadWorkspace() {
 
           <RejectedFiles rejectedItems={rejectedItems} />
 
+          {formError && (
+            <div
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-900"
+              role="alert"
+            >
+              {formError}
+            </div>
+          )}
+
           <div className="grid gap-2 text-left">
             <label
               htmlFor="prompt"
@@ -1027,8 +938,9 @@ export function UploadWorkspace() {
               onChange={(event) => setPrompt(event.target.value)}
               rows={4}
               required
+              disabled={isSubmitting}
               placeholder="Describe what you want Blooclip to create..."
-              className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5"
+              className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5 disabled:cursor-not-allowed disabled:bg-[#eef1f6] disabled:text-[#6f7785]"
             />
           </div>
 
@@ -1045,7 +957,8 @@ export function UploadWorkspace() {
                 id="target-language"
                 value={targetLanguage}
                 onChange={(event) => setTargetLanguage(event.target.value)}
-                className="h-[52px] w-full appearance-none rounded-lg border border-[#c5ccd8] bg-white px-12 text-base font-medium text-[#11131a] outline-none transition focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5"
+                disabled={isSubmitting}
+                className="h-[52px] w-full appearance-none rounded-lg border border-[#c5ccd8] bg-white px-12 text-base font-medium text-[#11131a] outline-none transition focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5 disabled:cursor-not-allowed disabled:bg-[#eef1f6] disabled:text-[#6f7785]"
               >
                 {TARGET_LANGUAGE_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -1062,18 +975,12 @@ export function UploadWorkspace() {
             disabled={!canGenerate}
             className="mt-1 h-[52px] rounded-lg bg-[#090a0d] px-6 text-base font-bold text-white shadow-sm shadow-black/20 transition hover:bg-black focus:outline-none focus:ring-4 focus:ring-black/15 disabled:cursor-not-allowed disabled:bg-[#aeb7c5] disabled:shadow-none"
           >
-            Generate
+            {isSubmitting ? getSubmitLabel(uploadItems) : "Generate"}
           </button>
         </form>
       </section>
 
-      <div id="processing-list">
-        <ProcessingList
-          jobs={jobs}
-          onDownloadVideo={downloadVideo}
-          onDownloadPdf={downloadInstructionPdf}
-        />
-      </div>
+      <UploadProgressList items={uploadItems} />
     </main>
   );
 }
