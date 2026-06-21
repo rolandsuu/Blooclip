@@ -32,9 +32,33 @@ const STAGE_COPY: Record<string, StageCopy> = {
     title: "Waiting for your video",
     detail: "Add a video and prompt when you are ready.",
   },
+  selected: {
+    title: "Videos selected",
+    detail: "Review the selected videos, then send them to Blooclip.",
+  },
   uploaded: {
     title: "Ready to start",
     detail: "The upload is ready. Blooclip can begin the AI work.",
+  },
+  creating_upload: {
+    title: "Preparing upload",
+    detail: "Blooclip is creating secure upload links for your videos.",
+  },
+  uploading: {
+    title: "Uploading videos",
+    detail: "Your browser is sending the selected videos to storage.",
+  },
+  marking_failed: {
+    title: "Saving upload errors",
+    detail: "Blooclip is recording which uploads need another try.",
+  },
+  queueing: {
+    title: "Starting AI processing",
+    detail: "Uploaded videos are being sent to the AI worker.",
+  },
+  redirecting: {
+    title: "Opening batch status",
+    detail: "Blooclip is opening the page where processing will continue.",
   },
   queued: {
     title: "Waiting for AI worker",

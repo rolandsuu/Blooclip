@@ -146,7 +146,7 @@ export function ProcessingBoard({
             </span>
           </div>
           <p className="mt-1 text-sm leading-6 text-black/60">
-            Blooclip shows the current AI task as it changes.
+            Blooclip shows the current task as it changes.
           </p>
         </div>
       </div>
