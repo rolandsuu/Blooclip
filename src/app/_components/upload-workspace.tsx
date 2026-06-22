@@ -1589,14 +1589,6 @@ export function UploadWorkspace() {
         </form>
       </section>
 
-      <RecentJobs
-        items={videoHistory}
-        isLoading={isLoadingHistory}
-        message={historyMessage}
-        activeBatchId={activeBatchId}
-        onSelect={openHistoryBatch}
-      />
-
       <UploadProgressList
         items={uploadItems}
         batchStatus={batchStatus}
@@ -1605,6 +1597,14 @@ export function UploadWorkspace() {
         downloadingInstructionPdfId={downloadingInstructionPdfId}
         onDownloadVideo={downloadVideo}
         onDownloadInstructionPdf={downloadInstructionPdf}
+      />
+
+      <RecentJobs
+        items={videoHistory}
+        isLoading={isLoadingHistory}
+        message={historyMessage}
+        activeBatchId={activeBatchId}
+        onSelect={openHistoryBatch}
       />
     </main>
   );

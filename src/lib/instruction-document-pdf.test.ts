@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -65,6 +66,39 @@ test("renderInstructionDocumentPdf writes a non-empty PDF", async () => {
     assert.ok(pdf.length > 1024);
     assert.equal(pdf.subarray(0, 4).toString("utf8"), "%PDF");
   } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("renderInstructionDocumentPdf does not require PDFKit Helvetica AFM data", async () => {
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "blooclip-pdf-test-"));
+  const outputPath = path.join(tmpDir, "instructions.pdf");
+  const originalReadFileSync = fs.readFileSync;
+
+  fs.readFileSync = function readFileSyncWithoutHelveticaAfm(
+    file: fs.PathOrFileDescriptor,
+    options?: BufferEncoding | { encoding?: BufferEncoding | null; flag?: string } | null
+  ) {
+    if (typeof file === "string" && file.endsWith("Helvetica.afm")) {
+      throw new Error("Helvetica.afm should not be read");
+    }
+
+    return originalReadFileSync.call(this, file, options as never);
+  } as typeof fs.readFileSync;
+
+  try {
+    await renderInstructionDocumentPdf({
+      document: sampleArtifact(),
+      frameAssets: [],
+      outputPath,
+    });
+
+    const pdf = await readFile(outputPath);
+
+    assert.ok(pdf.length > 1024);
+    assert.equal(pdf.subarray(0, 4).toString("utf8"), "%PDF");
+  } finally {
+    fs.readFileSync = originalReadFileSync;
     await rm(tmpDir, { recursive: true, force: true });
   }
 });

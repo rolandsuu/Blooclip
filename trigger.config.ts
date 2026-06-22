@@ -6,6 +6,7 @@ export default defineConfig({
   runtime: "node",
   logLevel: "log",
   build: {
+    external: ["@remotion/bundler", "@remotion/renderer", "remotion"],
     extensions: [
       ffmpeg(),
       additionalFiles({ files: ["assets/fonts/*.otf", "assets/fonts/*.txt"] }),

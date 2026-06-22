@@ -382,6 +382,7 @@ export async function renderInstructionDocumentPdf({
     const doc = new PDFDocument({
       size: PAGE_SIZE,
       margin: PAGE_MARGIN,
+      font: FONT_PATH,
       bufferPages: true,
       autoFirstPage: true,
       info: {

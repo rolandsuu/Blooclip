@@ -14,6 +14,8 @@ export type VideoJobHistoryItem = {
   createdAt: string;
 };
 
+export const RECENT_VIDEO_HISTORY_WINDOW_MS = 60 * 60 * 1000;
+
 type BatchRow = {
   id: string;
   title: string;
@@ -37,6 +39,20 @@ function getLatestDate(first: string, second: string) {
   return new Date(first).getTime() >= new Date(second).getTime()
     ? first
     : second;
+}
+
+export function filterRecentVideoJobs(
+  history: VideoJobHistoryItem[],
+  nowMs = Date.now(),
+  windowMs = RECENT_VIDEO_HISTORY_WINDOW_MS
+) {
+  const cutoffMs = nowMs - windowMs;
+
+  return history.filter((item) => {
+    const updatedAtMs = new Date(item.updatedAt).getTime();
+
+    return Number.isFinite(updatedAtMs) && updatedAtMs >= cutoffMs;
+  });
 }
 
 function getHistoryStatus(input: {
@@ -110,8 +126,8 @@ async function listVideoJobs(userId?: string) {
     videosByBatch.set(video.batch_id, videos);
   }
 
-  return batches
-    .map((batch) => {
+  return filterRecentVideoJobs(
+    batches.map((batch) => {
       const videos = videosByBatch.get(batch.id) ?? [];
       const completedCount = videos.filter(
         (video) => video.status === "completed"
@@ -147,10 +163,10 @@ async function listVideoJobs(userId?: string) {
         createdAt: batch.created_at,
       };
     })
-    .sort(
-      (left, right) =>
-        new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
-    );
+  ).sort(
+    (left, right) =>
+      new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+  );
 }
 
 export async function listUserVideoJobs(userId: string) {
