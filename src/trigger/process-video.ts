@@ -214,6 +214,7 @@ const FINAL_RENDER_PRESET = "veryfast";
 const DEFAULT_VIDEO_STYLE: VideoStyle = "instruction_overlay";
 const DEFAULT_RENDERER: FinalRenderer = "ffmpeg";
 const DEFAULT_OUTPUT_VIDEO_BITRATE = "8M";
+const EXPERIMENTAL_REMOTION_RENDERER_ENV = "EXPERIMENTAL_REMOTION_RENDERER";
 const REMOTION_COMPOSITION_ID = "InstructionVideo";
 const REMOTION_FPS = 30;
 const MAX_INSTRUCTION_DOCUMENT_STEPS = 12;
@@ -825,6 +826,10 @@ function getRenderer() {
     ["remotion", "ffmpeg"],
     DEFAULT_RENDERER
   );
+}
+
+function getExperimentalRemotionRendererEnabled() {
+  return getBooleanEnv(EXPERIMENTAL_REMOTION_RENDERER_ENV, false);
 }
 
 function getOutputVideoBitrate() {
@@ -5008,6 +5013,27 @@ function toWorkerError(error: unknown) {
   });
 }
 
+function toFinalRenderWorkerError(
+  error: unknown,
+  provider: "ffmpeg" | "remotion"
+) {
+  if (error instanceof WorkerError) {
+    return error;
+  }
+
+  const message =
+    error instanceof Error ? error.message : "Final video render failed";
+
+  return new WorkerError(message, {
+    code:
+      provider === "remotion"
+        ? "remotion_final_render_failed"
+        : "ffmpeg_final_render_failed",
+    provider,
+    retryable: true,
+  });
+}
+
 export async function runProcessVideo(payload: ProcessVideoPayload) {
   let stage: WorkerStage = "queued";
   let transcriptId: string | null = null;
@@ -5058,9 +5084,13 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     const videoAnalysisConfig = getVideoAnalysisConfig();
     const videoStyle = getVideoStyle();
     const renderer = getRenderer();
+    const experimentalRemotionRendererEnabled =
+      getExperimentalRemotionRendererEnabled();
     const outputVideoBitrate = getOutputVideoBitrate();
     const finalRenderer =
-      videoStyle === "instruction_overlay" ? renderer : "ffmpeg";
+      videoStyle === "instruction_overlay" && experimentalRemotionRendererEnabled
+        ? renderer
+        : "ffmpeg";
 
     if (!originalR2Key) {
       throw new WorkerError("Video record is missing an original R2 key", {
@@ -5695,29 +5725,36 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     stage = "rendering_final";
     await updateStage(payload.videoId, stage);
 
-    if (finalRenderer === "remotion" && overlayRenderPlan) {
-      await renderInstructionOverlayVideo({
-        mutedClipEditPath,
-        voiceoverPath,
-        outputPath: finalPath,
-        workDir,
-        renderDimensions,
-        overlayRenderPlan,
-        videoBitrate: outputVideoBitrate,
-      });
-    } else {
-      await renderFinalVideo({
-        mutedClipEditPath,
-        voiceoverPath,
-        subtitlesPath,
-        textOverlayPath: overlayRenderPlan ? instructionOverlayPath : null,
-        outputPath: finalPath,
-        workDir,
-        subtitleFontsDir: SUBTITLE_FONTS_DIR,
-        requireBurnedSubtitles:
-          Boolean(overlayRenderPlan) ||
-          getTargetLanguageCode(targetLanguage) === "zh",
-      });
+    const finalRenderProvider =
+      finalRenderer === "remotion" && overlayRenderPlan ? "remotion" : "ffmpeg";
+
+    try {
+      if (finalRenderProvider === "remotion" && overlayRenderPlan) {
+        await renderInstructionOverlayVideo({
+          mutedClipEditPath,
+          voiceoverPath,
+          outputPath: finalPath,
+          workDir,
+          renderDimensions,
+          overlayRenderPlan,
+          videoBitrate: outputVideoBitrate,
+        });
+      } else {
+        await renderFinalVideo({
+          mutedClipEditPath,
+          voiceoverPath,
+          subtitlesPath,
+          textOverlayPath: overlayRenderPlan ? instructionOverlayPath : null,
+          outputPath: finalPath,
+          workDir,
+          subtitleFontsDir: SUBTITLE_FONTS_DIR,
+          requireBurnedSubtitles:
+            Boolean(overlayRenderPlan) ||
+            getTargetLanguageCode(targetLanguage) === "zh",
+        });
+      }
+    } catch (error) {
+      throw toFinalRenderWorkerError(error, finalRenderProvider);
     }
 
     stage = "uploading_final";
