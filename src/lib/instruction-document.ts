@@ -147,6 +147,7 @@ export const INSTRUCTION_DOCUMENT_SCHEMA = {
           "purpose",
           "procedure",
           "inspectionCriteria",
+          "importantNotes",
           "timestampSeconds",
           "sourceStartSeconds",
           "sourceEndSeconds",

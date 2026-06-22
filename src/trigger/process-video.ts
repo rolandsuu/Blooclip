@@ -3293,7 +3293,7 @@ function buildInstructionDocumentInstructions(options: {
     "  - purpose: objective and expected outcome of the step",
     "  - procedure: step actions in imperative form",
     "  - inspectionCriteria: checks to validate completion of the step",
-    "  - importantNotes: optional notes; can be empty",
+    "  - importantNotes: required list of practical notes; use [] when there are no notes",
     "- finalInspectionChecklist: checks after all steps",
     "- maintenanceRecommendations: post-operations maintenance points",
     "Avoid mentioning source-video timestamps or frame timing in step text.",

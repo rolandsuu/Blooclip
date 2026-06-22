@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  INSTRUCTION_DOCUMENT_SCHEMA,
   InstructionDocumentValidationError,
   validateInstructionDocument,
   type InstructionDocument,
@@ -67,6 +68,64 @@ function validate(value: unknown, requestedTargetLanguage = "zh") {
   });
 }
 
+function assertOpenAiStrictSchema(schema: unknown, path = "schema") {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return;
+  }
+
+  const schemaRecord = schema as Record<string, unknown>;
+
+  if (
+    schemaRecord.type === "object" &&
+    schemaRecord.properties &&
+    typeof schemaRecord.properties === "object" &&
+    !Array.isArray(schemaRecord.properties)
+  ) {
+    const properties = schemaRecord.properties as Record<string, unknown>;
+    const propertyKeys = Object.keys(properties);
+
+    assert.equal(
+      schemaRecord.additionalProperties,
+      false,
+      `${path}.additionalProperties must be false`
+    );
+    assert.ok(Array.isArray(schemaRecord.required), `${path}.required must be an array`);
+
+    const required = schemaRecord.required as unknown[];
+
+    for (const key of propertyKeys) {
+      assert.ok(
+        required.includes(key),
+        `${path}.required must include properties.${key}`
+      );
+    }
+
+    for (const key of required) {
+      assert.equal(
+        typeof key,
+        "string",
+        `${path}.required entries must be strings`
+      );
+      assert.ok(
+        propertyKeys.includes(key),
+        `${path}.required contains unknown key ${String(key)}`
+      );
+    }
+
+    for (const [key, propertySchema] of Object.entries(properties)) {
+      assertOpenAiStrictSchema(propertySchema, `${path}.properties.${key}`);
+    }
+  }
+
+  if (schemaRecord.type === "array") {
+    assertOpenAiStrictSchema(schemaRecord.items, `${path}.items`);
+  }
+}
+
+test("INSTRUCTION_DOCUMENT_SCHEMA satisfies OpenAI strict object requirements", () => {
+  assertOpenAiStrictSchema(INSTRUCTION_DOCUMENT_SCHEMA);
+});
+
 test("validateInstructionDocument accepts and trims a valid document", () => {
   const document = validate(validDocument());
 
@@ -105,6 +164,9 @@ test("validateInstructionDocument accepts a valid English document", () => {
             "No selector switch is in emergency reset.",
           ],
           importantNotes: ["Pause if any gauge oscillates beyond expected range."],
+          timestampSeconds: 0,
+          sourceStartSeconds: 0,
+          sourceEndSeconds: 2,
           keyFrame: {
             ...validDocument().steps[0].keyFrame,
             visualFrameIndex: 1,
