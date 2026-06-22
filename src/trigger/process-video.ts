@@ -40,6 +40,7 @@ import {
   buildSubtitleCues,
   SubtitleCueGenerationError,
 } from "../lib/subtitle-cues";
+import { addSmoothBouncingWatermark } from "../lib/smooth-bouncing-watermark";
 import { supabaseAdmin } from "../lib/supabase-admin";
 import { getTargetLanguageCode } from "../lib/target-language";
 import {
@@ -244,8 +245,8 @@ const MAX_TRANSCRIPT_CONTEXT_CHARS = 6000;
 const MAX_EDIT_PLAN_UTTERANCES = 80;
 const MAX_EDIT_PLAN_WORDS = 300;
 const MIN_EDIT_SEGMENT_DURATION_SECONDS = 0.25;
-const FINAL_RENDER_CRF = "23";
-const FINAL_RENDER_PRESET = "veryfast";
+const FINAL_RENDER_CRF = "14";
+const FINAL_RENDER_PRESET = "medium";
 const DEFAULT_VIDEO_STYLE: VideoStyle = "instruction_overlay";
 const DEFAULT_RENDERER: FinalRenderer = "ffmpeg";
 const DEFAULT_OUTPUT_VIDEO_BITRATE = "8M";
@@ -4817,6 +4818,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   const subtitlesPath = path.join(workDir, "subtitles.ass");
   const instructionOverlayPath = path.join(workDir, "instruction-overlays.ass");
   const mutedClipEditPath = path.join(workDir, "muted-edit.mp4");
+  const finalRenderPath = path.join(workDir, "final-render.mp4");
   const finalPath = path.join(workDir, "final.mp4");
   const audioR2Key = `artifacts/${payload.videoId}/audio.wav`;
   const transcriptR2Key = `artifacts/${payload.videoId}/transcript.json`;
@@ -5492,7 +5494,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         await renderInstructionOverlayVideo({
           mutedClipEditPath,
           voiceoverPath,
-          outputPath: finalPath,
+          outputPath: finalRenderPath,
           workDir,
           renderDimensions,
           overlayRenderPlan,
@@ -5504,7 +5506,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
           voiceoverPath,
           subtitlesPath,
           textOverlayPath: overlayRenderPlan ? instructionOverlayPath : null,
-          outputPath: finalPath,
+          outputPath: finalRenderPath,
           workDir,
           subtitleFontsDir: SUBTITLE_FONTS_DIR,
           requireBurnedSubtitles:
@@ -5514,6 +5516,17 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       }
     } catch (error) {
       throw toFinalRenderWorkerError(error, finalRenderProvider);
+    }
+
+    try {
+      await addSmoothBouncingWatermark(finalRenderPath, finalPath, {
+        fontsDir: SUBTITLE_FONTS_DIR,
+        crf: FINAL_RENDER_CRF,
+        preset: FINAL_RENDER_PRESET,
+        workDir,
+      });
+    } catch (error) {
+      throw toFinalRenderWorkerError(error, "ffmpeg");
     }
 
     stage = "uploading_final";
