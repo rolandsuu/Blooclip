@@ -109,12 +109,12 @@ const STAGE_COPY: Record<string, StageCopy> = {
     detail: "剪辑列表和时间安排已准备好。",
   },
   writing_instruction_document: {
-    title: "正在编写操作文档",
-    detail: "AI 正在生成分步骤说明。",
+    title: "正在生成操作 PDF",
+    detail: "AI 正在整理分步骤说明并生成 PDF。",
   },
   instruction_document_ready: {
-    title: "操作文档已完成",
-    detail: "文档和 PDF 很快可以下载。",
+    title: "操作 PDF 已完成",
+    detail: "PDF 很快可以下载。",
   },
   writing_script: {
     title: "正在编写旁白",

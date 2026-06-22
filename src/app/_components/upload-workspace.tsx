@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, DragEvent, FormEvent } from "react";
 
 import {
@@ -43,13 +43,14 @@ type BatchVideoStatus = {
   id: string;
   batchPosition: number | null;
   filename: string | null;
+  contentType: string | null;
+  size: number | null;
   prompt: string | null;
   status: string;
   progress: number;
   currentStage: string | null;
   errorMessage: string | null;
   downloadReady: boolean;
-  instructionReady: boolean;
   instructionPdfReady: boolean;
   createdAt: string;
   updatedAt: string;
@@ -63,6 +64,20 @@ type BatchStatus = {
   createdAt: string;
   updatedAt: string;
   videos: BatchVideoStatus[];
+};
+
+type VideoJobHistoryItem = {
+  id: string;
+  title: string;
+  targetLanguage: string;
+  expectedVideoCount: number;
+  videoCount: number;
+  activeCount: number;
+  completedCount: number;
+  failedCount: number;
+  status: "active" | "completed" | "failed" | "created";
+  updatedAt: string;
+  createdAt: string;
 };
 
 type UploadSessionVideo = {
@@ -100,6 +115,20 @@ function formatFileSize(bytes: number) {
   }
 
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatVideoMeta(size: number | null | undefined, contentType: string | null | undefined) {
+  const parts: string[] = [];
+
+  if (typeof size === "number" && size > 0) {
+    parts.push(formatFileSize(size));
+  }
+
+  if (contentType) {
+    parts.push(contentType);
+  }
+
+  return parts.join(" · ") || "视频文件";
 }
 
 function getUploadItemId(file: File, index: number) {
@@ -321,6 +350,22 @@ async function loadBatchStatus(batchId: string) {
   }
 
   return (await response.json()) as BatchStatus;
+}
+
+async function loadVideoHistory() {
+  const response = await fetch("/api/video-history");
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response, "加载最近任务失败。"));
+  }
+
+  const data = (await response.json()) as { history?: unknown };
+
+  if (!Array.isArray(data.history)) {
+    throw new Error("最近任务响应无效。");
+  }
+
+  return data.history as VideoJobHistoryItem[];
 }
 
 function isTerminalStatus(status: string) {
@@ -602,6 +647,151 @@ function SelectedFiles({ selections }: { selections: UploadSelection[] }) {
   );
 }
 
+function formatDateTime(value: string) {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function getHistoryStatusLabel(status: VideoJobHistoryItem["status"]) {
+  switch (status) {
+    case "active":
+      return "处理中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "有失败";
+    case "created":
+      return "待开始";
+  }
+}
+
+function getHistoryStatusClasses(status: VideoJobHistoryItem["status"]) {
+  switch (status) {
+    case "completed":
+      return "border-[#cbe8d1] bg-[#f0fbf2] text-[#198a35]";
+    case "failed":
+      return "border-red-200 bg-red-50 text-[#c81818]";
+    case "active":
+      return "border-[#d5dbe5] bg-[#f4f6fa] text-[#11131a]";
+    case "created":
+      return "border-[#dce1ea] bg-[#fbfcfe] text-[#586273]";
+  }
+}
+
+type RecentJobsProps = {
+  items: VideoJobHistoryItem[];
+  isLoading: boolean;
+  message: string | null;
+  activeBatchId: string | null;
+  onSelect(batchId: string): void;
+};
+
+function RecentJobs({
+  items,
+  isLoading,
+  message,
+  activeBatchId,
+  onSelect,
+}: RecentJobsProps) {
+  if (isLoading && items.length === 0) {
+    return (
+      <section className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8">
+        <div className="mx-auto max-w-[1100px]">
+          <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
+            最近任务
+          </h2>
+          <p className="mt-2 text-sm font-medium text-[#6f7785]">
+            正在加载最近任务...
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  if (items.length === 0 && !message) {
+    return null;
+  }
+
+  return (
+    <section className="border-t border-[#d5dbe5] bg-white px-4 py-5 sm:px-8">
+      <div className="mx-auto max-w-[1100px]">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
+              最近任务
+            </h2>
+            {message && (
+              <p className="mt-1 text-sm font-medium text-[#c81818]">
+                {message}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {items.length > 0 && (
+          <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
+            <ul aria-live="polite">
+              {items.map((item) => {
+                const isActive = item.id === activeBatchId;
+
+                return (
+                  <li
+                    key={item.id}
+                    className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px_120px] md:items-center md:gap-5"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="truncate text-sm font-bold text-[#11131a]">
+                          {item.title}
+                        </p>
+                        <span
+                          className={cx(
+                            "rounded border px-2 py-0.5 text-xs font-semibold",
+                            getHistoryStatusClasses(item.status)
+                          )}
+                        >
+                          {getHistoryStatusLabel(item.status)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-sm text-[#6f7785]">
+                        视频 {item.videoCount}/{item.expectedVideoCount} · 已完成{" "}
+                        {item.completedCount} · 失败 {item.failedCount}
+                      </p>
+                    </div>
+
+                    <p className="text-sm font-medium text-[#6f7785]">
+                      更新 {formatDateTime(item.updatedAt)}
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() => onSelect(item.id)}
+                      disabled={isActive}
+                      className="h-9 rounded-md border border-[#c5ccd8] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:border-[#11131a] disabled:cursor-default disabled:border-[#11131a] disabled:bg-[#11131a] disabled:text-white"
+                    >
+                      {isActive ? "已打开" : "打开"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 type UploadProgressListProps = {
   items: UploadProgressItem[];
   batchStatus: BatchStatus | null;
@@ -621,7 +811,21 @@ function UploadProgressList({
   onDownloadVideo,
   onDownloadInstructionPdf,
 }: UploadProgressListProps) {
-  if (items.length === 0) {
+  const rows =
+    items.length > 0
+      ? items
+      : (batchStatus?.videos ?? []).map((video) => ({
+          id: video.id,
+          videoId: video.id,
+          filename: video.filename ?? "未命名视频",
+          contentType: video.contentType ?? "",
+          size: video.size ?? 0,
+          phase: "queueing" as UploadPhase,
+          progress: video.progress,
+          message: "已载入任务",
+        }));
+
+  if (rows.length === 0) {
     return null;
   }
 
@@ -639,7 +843,7 @@ function UploadProgressList({
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 className="text-2xl font-bold tracking-tight text-[#11131a]">
-              {batchStatus ? "处理进度" : "上传进度"}
+              {batchStatus ? "处理结果" : "上传进度"}
             </h2>
             {statusMessage && (
               <p className="mt-1 text-sm font-medium text-[#6f7785]">
@@ -675,8 +879,11 @@ function UploadProgressList({
           </div>
 
           <ul aria-live="polite">
-            {items.map((item) => {
+            {rows.map((item) => {
               const batchVideo = item.videoId ? videosById.get(item.videoId) : null;
+              const filename = batchVideo?.filename ?? item.filename;
+              const contentType = batchVideo?.contentType ?? item.contentType;
+              const size = batchVideo?.size ?? item.size;
               const display = batchVideo
                 ? getProcessingDisplay({
                     status: batchVideo.status,
@@ -710,14 +917,14 @@ function UploadProgressList({
                   key={item.id}
                   className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_220px_190px_170px] md:items-center md:gap-5"
                 >
-                  <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
+                    <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
                     <FileThumb />
                     <div className="min-w-0">
                       <p className="truncate text-sm font-bold text-[#11131a]">
-                        {batchVideo?.filename ?? item.filename}
+                        {filename}
                       </p>
                       <p className="mt-1 text-sm text-[#6f7785]">
-                        {formatFileSize(item.size)} · {item.contentType}
+                        {formatVideoMeta(size, contentType)}
                       </p>
                     </div>
                   </div>
@@ -807,6 +1014,10 @@ export function UploadWorkspace() {
   const [batchStatusMessage, setBatchStatusMessage] = useState<string | null>(
     null
   );
+  const [videoHistory, setVideoHistory] = useState<VideoJobHistoryItem[]>([]);
+  const [historyMessage, setHistoryMessage] = useState<string | null>(null);
+  const [historyRefreshCount, setHistoryRefreshCount] = useState(0);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [formError, setFormError] = useState<string | null>(null);
   const [downloadingVideoId, setDownloadingVideoId] = useState<string | null>(
     null
@@ -815,6 +1026,7 @@ export function UploadWorkspace() {
     useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const pendingResultScrollRef = useRef(false);
 
   const selectedTotalSize = useMemo(
     () => selectedUploads.reduce((total, item) => total + item.size, 0),
@@ -822,6 +1034,37 @@ export function UploadWorkspace() {
   );
   const canGenerate =
     selectedUploads.length > 0 && prompt.trim().length > 0 && !isSubmitting;
+
+  useEffect(() => {
+    let active = true;
+
+    async function refreshVideoHistory() {
+      setIsLoadingHistory(true);
+
+      try {
+        const history = await loadVideoHistory();
+
+        if (active) {
+          setVideoHistory(history);
+          setHistoryMessage(null);
+        }
+      } catch (error) {
+        if (active) {
+          setHistoryMessage(getErrorMessage(error, "加载最近任务失败。"));
+        }
+      } finally {
+        if (active) {
+          setIsLoadingHistory(false);
+        }
+      }
+    }
+
+    refreshVideoHistory();
+
+    return () => {
+      active = false;
+    };
+  }, [historyRefreshCount]);
 
   useEffect(() => {
     if (!activeBatchId) {
@@ -851,6 +1094,7 @@ export function UploadWorkspace() {
               : "处理完成，可以下载结果。"
           );
           setIsSubmitting(false);
+          setHistoryRefreshCount((value) => value + 1);
 
           if (intervalId !== null) {
             window.clearInterval(intervalId);
@@ -883,6 +1127,18 @@ export function UploadWorkspace() {
       }
     };
   }, [activeBatchId]);
+
+  useEffect(() => {
+    if (!batchStatus || !pendingResultScrollRef.current) {
+      return;
+    }
+
+    pendingResultScrollRef.current = false;
+    document.getElementById("upload-progress")?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }, [batchStatus]);
 
   function updateUploadItem(
     id: string,
@@ -922,6 +1178,20 @@ export function UploadWorkspace() {
     setActiveBatchId(null);
     setBatchStatus(null);
     setBatchStatusMessage(null);
+    pendingResultScrollRef.current = false;
+    setFormError(null);
+    setDownloadingVideoId(null);
+    setDownloadingInstructionPdfId(null);
+  }
+
+  function openHistoryBatch(batchId: string) {
+    setSelectedUploads([]);
+    setRejectedItems([]);
+    setUploadItems([]);
+    setActiveBatchId(batchId);
+    setBatchStatus(null);
+    setBatchStatusMessage("正在加载任务...");
+    pendingResultScrollRef.current = true;
     setFormError(null);
     setDownloadingVideoId(null);
     setDownloadingInstructionPdfId(null);
@@ -1064,7 +1334,7 @@ export function UploadWorkspace() {
 
     try {
       const response = await fetch(
-        `/api/videos/${encodeURIComponent(videoId)}/instruction-document`
+        `/api/videos/${encodeURIComponent(videoId)}/instruction-pdf-url`
       );
 
       if (!response.ok) {
@@ -1161,6 +1431,8 @@ export function UploadWorkspace() {
       setActiveBatchId(session.batchId);
       setBatchStatusMessage("AI 处理已启动。");
       setSelectedUploads([]);
+      pendingResultScrollRef.current = true;
+      setHistoryRefreshCount((value) => value + 1);
     } catch (error) {
       setFormError(getErrorMessage(error));
       setIsSubmitting(false);
@@ -1316,6 +1588,14 @@ export function UploadWorkspace() {
           </button>
         </form>
       </section>
+
+      <RecentJobs
+        items={videoHistory}
+        isLoading={isLoadingHistory}
+        message={historyMessage}
+        activeBatchId={activeBatchId}
+        onSelect={openHistoryBatch}
+      />
 
       <UploadProgressList
         items={uploadItems}

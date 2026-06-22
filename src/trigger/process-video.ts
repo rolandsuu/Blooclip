@@ -3885,7 +3885,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   const videoEventAnalysisR2Key = `artifacts/${payload.videoId}/video-event-analysis.json`;
   const visualTimelineR2Key = `artifacts/${payload.videoId}/visual-timeline.json`;
   const editPlanR2Key = `artifacts/${payload.videoId}/edit-plan.json`;
-  const instructionDocR2Key = `artifacts/${payload.videoId}/instruction-document/document.json`;
   const instructionPdfR2Key = `artifacts/${payload.videoId}/instruction-document/instructions.pdf`;
   const voiceoverScriptR2Key = `artifacts/${payload.videoId}/voiceover-script.json`;
   const voiceoverR2Key = `artifacts/${payload.videoId}/voiceover.mp3`;
@@ -4220,11 +4219,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
       outputPath: instructionPdfPath,
     });
 
-    for (const frameAsset of instructionFrameAssets) {
-      await uploadFileToR2(frameAsset.r2Key, frameAsset.filePath, "image/jpeg");
-    }
-
-    await uploadJsonToR2(instructionDocR2Key, instructionDocumentArtifact);
     await uploadFileToR2(
       instructionPdfR2Key,
       instructionPdfPath,
@@ -4242,7 +4236,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
-      instruction_doc_r2_key: instructionDocR2Key,
       instruction_pdf_r2_key: instructionPdfR2Key,
       provider_request_id:
         openAiInstructionDocumentResponseId ??
@@ -4301,7 +4294,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
-      instruction_doc_r2_key: instructionDocR2Key,
       instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       provider_request_id:
@@ -4405,7 +4397,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
-      instruction_doc_r2_key: instructionDocR2Key,
       instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       subtitle_r2_key: subtitleR2Key,
@@ -4471,7 +4462,6 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
         : null,
       visual_timeline_r2_key: visualTimelineR2Key,
       edit_plan_r2_key: editPlanR2Key,
-      instruction_doc_r2_key: instructionDocR2Key,
       instruction_pdf_r2_key: instructionPdfR2Key,
       voiceover_script_r2_key: voiceoverScriptR2Key,
       subtitle_r2_key: subtitleR2Key,
