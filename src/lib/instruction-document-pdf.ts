@@ -40,21 +40,21 @@ const COLORS = {
   cautionLine: "#e3b245",
   checklist: "#eaf7ef",
   checklistLine: "#45a866",
-  warning: "#fff0f0",
-  warningLine: "#d36b6b",
 } as const;
 
 type LocalizedPdfCopy = {
   guideLabel: string;
+  equipmentName: string;
   overview: string;
+  safetyPrecautions: string;
+  requiredTools: string;
   steps: string;
-  cautions: string;
-  checklist: string;
-  warnings: string;
-  sourceTime: string;
-  generated: string;
-  duration: string;
-  stepCount: string;
+  purpose: string;
+  procedure: string;
+  inspection: string;
+  notes: string;
+  finalChecklist: string;
+  maintenance: string;
   page: (pageNumber: number, pageCount: number) => string;
 };
 
@@ -72,62 +72,36 @@ function getLocalizedCopy(targetLanguage: string): LocalizedPdfCopy {
   if (isChineseTargetLanguage(targetLanguage)) {
     return {
       guideLabel: "客户操作指南",
+      equipmentName: "设备名称",
       overview: "概览",
-      steps: "操作步骤",
-      cautions: "注意事项",
-      checklist: "完成检查",
-      warnings: "限制说明",
-      sourceTime: "来源时间",
-      generated: "生成时间",
-      duration: "源视频时长",
-      stepCount: "步骤数量",
+      safetyPrecautions: "安全注意事项",
+      requiredTools: "所需工具与部件",
+      steps: "操作/安装程序",
+      purpose: "目标",
+      procedure: "操作",
+      inspection: "检验标准",
+      notes: "重要提示",
+      finalChecklist: "完成检查清单",
+      maintenance: "维护建议",
       page: (pageNumber, pageCount) => `第 ${pageNumber} 页 / 共 ${pageCount} 页`,
     };
   }
 
   return {
-    guideLabel: "Customer Handoff Guide",
+    guideLabel: "Customer Operation Manual",
+    equipmentName: "Equipment Name",
     overview: "Overview",
-    steps: "Steps",
-    cautions: "Things to be careful with",
-    checklist: "Final checklist",
-    warnings: "Source limitations",
-    sourceTime: "Source time",
-    generated: "Generated",
-    duration: "Source duration",
-    stepCount: "Step count",
+    safetyPrecautions: "Safety Precautions",
+    requiredTools: "Required Tools and Components",
+    steps: "Operating / Installation Procedure",
+    purpose: "Purpose",
+    procedure: "Procedure",
+    inspection: "Inspection Criteria",
+    notes: "Important Notes",
+    finalChecklist: "Final Inspection Checklist",
+    maintenance: "Maintenance Recommendations",
     page: (pageNumber, pageCount) => `Page ${pageNumber} of ${pageCount}`,
   };
-}
-
-function formatTimestamp(seconds: number) {
-  const totalSeconds = Math.max(0, Math.round(seconds));
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = totalSeconds % 60;
-
-  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
-}
-
-function formatDuration(seconds: number) {
-  const totalSeconds = Math.max(0, Math.round(seconds));
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainingSeconds = totalSeconds % 60;
-
-  if (minutes === 0) {
-    return `${remainingSeconds}s`;
-  }
-
-  return `${minutes}m ${remainingSeconds}s`;
-}
-
-function formatDate(value: string) {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return date.toISOString().slice(0, 10);
 }
 
 function ensureSpace(doc: PDFKit.PDFDocument, height: number) {
@@ -184,35 +158,6 @@ function addParagraph(
     lineGap: 3,
   });
   doc.moveDown(gapAfter / 12);
-}
-
-function addMetadataRow(
-  doc: PDFKit.PDFDocument,
-  items: Array<{ label: string; value: string }>
-) {
-  const gap = 10;
-  const itemWidth = (CONTENT_WIDTH - gap * (items.length - 1)) / items.length;
-  const y = doc.y;
-
-  ensureSpace(doc, 58);
-
-  for (const [index, item] of items.entries()) {
-    const x = PAGE_MARGIN + index * (itemWidth + gap);
-
-    doc.roundedRect(x, y, itemWidth, 50, 6).fill(COLORS.faint);
-    setFont(doc, { size: 8.5, color: COLORS.muted });
-    doc.text(item.label, x + 10, y + 9, {
-      width: itemWidth - 20,
-      lineGap: 1,
-    });
-    setFont(doc, { size: 11, color: COLORS.ink });
-    doc.text(item.value, x + 10, y + 27, {
-      width: itemWidth - 20,
-      lineGap: 1,
-    });
-  }
-
-  doc.y = y + 66;
 }
 
 function addBulletList(
@@ -324,15 +269,8 @@ function addCover(doc: PDFKit.PDFDocument, options: {
   });
   doc.y = 205;
 
-  addMetadataRow(doc, [
-    { label: copy.generated, value: formatDate(document.completedAt) },
-    {
-      label: copy.duration,
-      value: formatDuration(document.sourceDurationSeconds),
-    },
-    { label: copy.stepCount, value: String(document.steps.length) },
-  ]);
-
+  addSectionHeading(doc, copy.equipmentName);
+  addParagraph(doc, document.title, { size: 12, gapAfter: 18 });
   addSectionHeading(doc, copy.overview);
   addParagraph(doc, document.overview, { size: 11.5, gapAfter: 16 });
 }
@@ -401,13 +339,24 @@ export async function renderInstructionDocumentPdf({
 
     addCover(doc, { document, copy });
     doc.addPage();
+
+    addSectionHeading(doc, copy.safetyPrecautions);
+    addBulletList(doc, document.safetyPrecautions, {
+      background: COLORS.checklist,
+      lineColor: COLORS.checklistLine,
+    });
+
+    if (document.requiredToolsAndComponents.length > 0) {
+      addSectionHeading(doc, copy.requiredTools);
+      addBulletList(doc, document.requiredToolsAndComponents, {
+        background: COLORS.primarySoft,
+      });
+    }
+
     addSectionHeading(doc, copy.steps);
 
     for (const step of document.steps) {
       const frameAsset = frameAssetByStepIndex.get(step.stepIndex);
-      const timestamp = `${copy.sourceTime}: ${formatTimestamp(
-        step.timestampSeconds
-      )}`;
 
       ensureSpace(doc, STEP_MIN_HEIGHT);
       setFont(doc, { size: 17, color: COLORS.ink });
@@ -417,7 +366,15 @@ export async function renderInstructionDocumentPdf({
       });
       doc.moveDown(0.35);
       setFont(doc, { size: 9.5, color: COLORS.muted });
-      doc.text(timestamp, PAGE_MARGIN, doc.y, {
+      doc.text(`${copy.purpose}:`, PAGE_MARGIN, doc.y, {
+        width: CONTENT_WIDTH,
+        lineGap: 1,
+      });
+      doc.moveDown(0.35);
+      addParagraph(doc, step.purpose, { size: 11, gapAfter: 10 });
+
+      setFont(doc, { size: 9.5, color: COLORS.muted });
+      doc.text(`${copy.procedure}:`, PAGE_MARGIN, doc.y, {
         width: CONTENT_WIDTH,
         lineGap: 1,
       });
@@ -427,25 +384,33 @@ export async function renderInstructionDocumentPdf({
         addStepImage(doc, frameAsset.filePath);
       }
 
-      addParagraph(doc, step.instruction, { size: 11, gapAfter: 10 });
-      addBulletList(doc, step.cautions, {
-        title: copy.cautions,
+      addParagraph(doc, step.procedure, { size: 11, gapAfter: 10 });
+      addBulletList(doc, step.inspectionCriteria, {
+        title: copy.inspection,
         background: COLORS.caution,
         lineColor: COLORS.cautionLine,
       });
+
+      if (step.importantNotes.length > 0) {
+        addBulletList(doc, step.importantNotes, {
+          title: copy.notes,
+          background: COLORS.primarySoft,
+          lineColor: COLORS.primary,
+        });
+      }
     }
 
-    addSectionHeading(doc, copy.checklist);
-    addBulletList(doc, document.checklist, {
+    addSectionHeading(doc, copy.finalChecklist);
+    addBulletList(doc, document.finalInspectionChecklist, {
       background: COLORS.checklist,
       lineColor: COLORS.checklistLine,
     });
 
-    if (document.warnings.length > 0) {
-      addSectionHeading(doc, copy.warnings);
-      addBulletList(doc, document.warnings, {
-        background: COLORS.warning,
-        lineColor: COLORS.warningLine,
+    if (document.maintenanceRecommendations.length > 0) {
+      addSectionHeading(doc, copy.maintenance);
+      addBulletList(doc, document.maintenanceRecommendations, {
+        background: COLORS.primarySoft,
+        lineColor: COLORS.primary,
       });
     }
 

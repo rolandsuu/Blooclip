@@ -12,8 +12,10 @@ export type InstructionDocumentKeyFrame = {
 export type InstructionDocumentStep = {
   stepIndex: number;
   title: string;
-  instruction: string;
-  cautions: string[];
+  purpose: string;
+  procedure: string;
+  inspectionCriteria: string[];
+  importantNotes: string[];
   timestampSeconds: number;
   sourceStartSeconds: number;
   sourceEndSeconds: number;
@@ -24,9 +26,11 @@ export type InstructionDocument = {
   title: string;
   overview: string;
   targetLanguage: string;
+  safetyPrecautions: string[];
+  requiredToolsAndComponents: string[];
+  finalInspectionChecklist: string[];
+  maintenanceRecommendations: string[];
   steps: InstructionDocumentStep[];
-  checklist: string[];
-  warnings: string[];
 };
 
 export type InstructionDocumentArtifactStep = Omit<
@@ -78,14 +82,48 @@ export const INSTRUCTION_DOCUMENT_SCHEMA = {
     "title",
     "overview",
     "targetLanguage",
+    "safetyPrecautions",
+    "requiredToolsAndComponents",
+    "finalInspectionChecklist",
+    "maintenanceRecommendations",
     "steps",
-    "checklist",
-    "warnings",
   ],
   properties: {
     title: {
       type: "string",
       description: "Short user-facing title for the instruction document.",
+    },
+    safetyPrecautions: {
+      type: "array",
+      minItems: 1,
+      maxItems: 12,
+      items: { type: "string" },
+      description:
+        "Safety precautions to show as part of the customer-facing safety section.",
+    },
+    requiredToolsAndComponents: {
+      type: "array",
+      minItems: 0,
+      maxItems: 20,
+      items: { type: "string" },
+      description:
+        "Required tools and components needed for successful operation or installation. Can be empty if not identifiable.",
+    },
+    finalInspectionChecklist: {
+      type: "array",
+      minItems: 3,
+      maxItems: 12,
+      items: { type: "string" },
+      description:
+        "Final inspection checklist items customers should verify after completing all steps.",
+    },
+    maintenanceRecommendations: {
+      type: "array",
+      minItems: 1,
+      maxItems: 12,
+      items: { type: "string" },
+      description:
+        "Post-operation maintenance recommendations for continued safe operation.",
     },
     overview: {
       type: "string",
@@ -106,8 +144,9 @@ export const INSTRUCTION_DOCUMENT_SCHEMA = {
         required: [
           "stepIndex",
           "title",
-          "instruction",
-          "cautions",
+          "purpose",
+          "procedure",
+          "inspectionCriteria",
           "timestampSeconds",
           "sourceStartSeconds",
           "sourceEndSeconds",
@@ -123,18 +162,31 @@ export const INSTRUCTION_DOCUMENT_SCHEMA = {
             type: "string",
             description: "Short user-facing step title.",
           },
-          instruction: {
+          purpose: {
             type: "string",
             description:
-              "Plain-language instruction for this step. No markdown or HTML.",
+              "Purpose of this step and what outcome it establishes.",
           },
-          cautions: {
+          procedure: {
+            type: "string",
+            description:
+              "Detailed operator procedure for this step. No markdown or HTML.",
+          },
+          inspectionCriteria: {
             type: "array",
             minItems: 1,
-            maxItems: 4,
+            maxItems: 6,
             items: { type: "string" },
             description:
-              "Customer-facing things to be careful with for this exact step. Keep them practical and evidence-based.",
+              "Inspection criteria for this step. Operators should verify these points after completion.",
+          },
+          importantNotes: {
+            type: "array",
+            minItems: 0,
+            maxItems: 6,
+            items: { type: "string" },
+            description:
+              "Optional practical notes for operators for this step.",
           },
           timestampSeconds: {
             type: "number",
@@ -178,19 +230,6 @@ export const INSTRUCTION_DOCUMENT_SCHEMA = {
         },
       },
     },
-    checklist: {
-      type: "array",
-      minItems: 3,
-      maxItems: 8,
-      items: { type: "string" },
-      description:
-        "Final customer handoff checklist. These are concrete checks the customer should complete after following all steps.",
-    },
-    warnings: {
-      type: "array",
-      items: { type: "string" },
-      description: "Document limitations or uncertainty notes. Can be empty.",
-    },
   },
 } as const;
 
@@ -198,15 +237,19 @@ const TOP_LEVEL_KEYS = new Set([
   "title",
   "overview",
   "targetLanguage",
+  "safetyPrecautions",
+  "requiredToolsAndComponents",
+  "finalInspectionChecklist",
+  "maintenanceRecommendations",
   "steps",
-  "checklist",
-  "warnings",
 ]);
 const STEP_KEYS = new Set([
   "stepIndex",
   "title",
-  "instruction",
-  "cautions",
+  "purpose",
+  "procedure",
+  "inspectionCriteria",
+  "importantNotes",
   "timestampSeconds",
   "sourceStartSeconds",
   "sourceEndSeconds",
@@ -220,14 +263,19 @@ const KEY_FRAME_KEYS = new Set([
 
 const STRING_LIMITS = {
   title: 140,
-  overview: 1200,
+  overview: 1400,
   targetLanguage: 32,
-  stepTitle: 120,
-  instruction: 1800,
-  caution: 500,
+  stepTitle: 110,
+  purpose: 500,
+  procedure: 2500,
+  inspectionCriteria: 500,
+  importantNotes: 500,
+  safetyPrecaution: 500,
+  requiredTool: 500,
   checklistItem: 500,
+  finalChecklistItem: 500,
+  maintenanceRecommendation: 500,
   altText: 240,
-  warning: 500,
 } as const;
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
@@ -236,9 +284,15 @@ const SCRIPT_URL_PATTERN = /\b(?:javascript|data)\s*:/i;
 const EVENT_HANDLER_PATTERN = /\bon[a-z]+\s*=/i;
 const FRAME_TIMESTAMP_TOLERANCE_SECONDS = 0.05;
 const DEFAULT_MAX_STEPS = 20;
-const MAX_STEP_CAUTIONS = 4;
-const MIN_CHECKLIST_ITEMS = 3;
-const MAX_CHECKLIST_ITEMS = 8;
+const MAX_STEP_INSPECTION_CRITERIA = 6;
+const MAX_STEP_NOTES = 6;
+const MIN_SAFETY_PRECAUTIONS = 1;
+const MAX_SAFETY_PRECAUTIONS = 12;
+const MAX_REQUIRED_TOOLS = 20;
+const MIN_FINAL_INSPECTION_CHECKLIST_ITEMS = 3;
+const MAX_FINAL_INSPECTION_CHECKLIST_ITEMS = 12;
+const MIN_MAINTENANCE_RECOMMENDATIONS = 1;
+const MAX_MAINTENANCE_RECOMMENDATIONS = 12;
 
 function fail(message: string): never {
   throw new InstructionDocumentValidationError(message);
@@ -506,16 +560,32 @@ export function validateInstructionDocument(
         `${fieldPrefix}.title`,
         STRING_LIMITS.stepTitle
       ),
-      instruction: validateSafeString(
-        rawStep.instruction,
-        `${fieldPrefix}.instruction`,
-        STRING_LIMITS.instruction
+      purpose: validateSafeString(
+        rawStep.purpose,
+        `${fieldPrefix}.purpose`,
+        STRING_LIMITS.purpose
       ),
-      cautions: validateStringArray(rawStep.cautions, `${fieldPrefix}.cautions`, {
+      procedure: validateSafeString(
+        rawStep.procedure,
+        `${fieldPrefix}.procedure`,
+        STRING_LIMITS.procedure
+      ),
+      inspectionCriteria: validateStringArray(
+        rawStep.inspectionCriteria,
+        `${fieldPrefix}.inspectionCriteria`,
+        {
         minItems: 1,
-        maxItems: MAX_STEP_CAUTIONS,
-        maxStringLength: STRING_LIMITS.caution,
-      }),
+          maxItems: MAX_STEP_INSPECTION_CRITERIA,
+          maxStringLength: STRING_LIMITS.inspectionCriteria,
+        }
+      ),
+      importantNotes: Array.isArray(rawStep.importantNotes)
+        ? validateStringArray(rawStep.importantNotes, `${fieldPrefix}.importantNotes`, {
+            minItems: 0,
+            maxItems: MAX_STEP_NOTES,
+            maxStringLength: STRING_LIMITS.importantNotes,
+          })
+        : [],
       timestampSeconds,
       sourceStartSeconds,
       sourceEndSeconds,
@@ -531,13 +601,37 @@ export function validateInstructionDocument(
     };
   });
 
-  const checklist = validateStringArray(value.checklist, "checklist", {
-    minItems: MIN_CHECKLIST_ITEMS,
-    maxItems: MAX_CHECKLIST_ITEMS,
-    maxStringLength: STRING_LIMITS.checklistItem,
+  const safetyPrecautions = validateStringArray(
+    value.safetyPrecautions,
+    "safetyPrecautions",
+    {
+    minItems: MIN_SAFETY_PRECAUTIONS,
+    maxItems: MAX_SAFETY_PRECAUTIONS,
+    maxStringLength: STRING_LIMITS.safetyPrecaution,
   });
-  const warnings = validateStringArray(value.warnings, "warnings", {
-    maxStringLength: STRING_LIMITS.warning,
+  const requiredToolsAndComponents = validateStringArray(
+    value.requiredToolsAndComponents,
+    "requiredToolsAndComponents",
+    {
+    minItems: 0,
+    maxItems: MAX_REQUIRED_TOOLS,
+    maxStringLength: STRING_LIMITS.requiredTool,
+  });
+  const finalInspectionChecklist = validateStringArray(
+    value.finalInspectionChecklist,
+    "finalInspectionChecklist",
+    {
+    minItems: MIN_FINAL_INSPECTION_CHECKLIST_ITEMS,
+    maxItems: MAX_FINAL_INSPECTION_CHECKLIST_ITEMS,
+    maxStringLength: STRING_LIMITS.finalChecklistItem,
+  });
+  const maintenanceRecommendations = validateStringArray(
+    value.maintenanceRecommendations,
+    "maintenanceRecommendations",
+    {
+    minItems: MIN_MAINTENANCE_RECOMMENDATIONS,
+    maxItems: MAX_MAINTENANCE_RECOMMENDATIONS,
+    maxStringLength: STRING_LIMITS.maintenanceRecommendation,
   });
 
   return {
@@ -549,7 +643,9 @@ export function validateInstructionDocument(
     ),
     targetLanguage,
     steps,
-    checklist,
-    warnings,
+    safetyPrecautions,
+    requiredToolsAndComponents,
+    finalInspectionChecklist,
+    maintenanceRecommendations,
   };
 }

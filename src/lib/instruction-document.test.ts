@@ -20,12 +20,31 @@ function validDocument(
     title: " Make a product demo ",
     overview: "This guide explains the upload flow.",
     targetLanguage: "zh",
+    safetyPrecautions: [
+      "Ensure the work area is clean and free of obstructions.",
+      "Wear approved safety equipment.",
+    ],
+    requiredToolsAndComponents: ["Laptop", "Power cable"],
+    finalInspectionChecklist: [
+      "Confirm every required file was selected.",
+      "Confirm the prompt matches the desired output.",
+      "Confirm the result is ready before sharing.",
+    ],
+    maintenanceRecommendations: ["Close and lock all access panels after completion."],
     steps: [
       {
         stepIndex: 1,
         title: "Open the upload screen",
-        instruction: "Choose the source video and confirm the prompt.",
-        cautions: ["Confirm the selected video is the intended source file."],
+        purpose: "Prepare the source and settings for upload.",
+        procedure:
+          "Choose the source video and confirm the prompt. Do not proceed until both are correct.",
+        inspectionCriteria: [
+          "The correct file is visible in source selection.",
+          "The target outcome text matches your requirement.",
+        ],
+        importantNotes: [
+          "You can restart this step if the preview appears incorrect.",
+        ],
         timestampSeconds: 4.5,
         sourceStartSeconds: 3,
         sourceEndSeconds: 6,
@@ -36,19 +55,13 @@ function validDocument(
         },
       },
     ],
-    checklist: [
-      "Confirm every required file was selected.",
-      "Confirm the prompt matches the desired output.",
-      "Confirm the result is ready before sharing.",
-    ],
-    warnings: ["Frame sampling may miss very quick transitions."],
     ...overrides,
   };
 }
 
-function validate(value: unknown) {
+function validate(value: unknown, requestedTargetLanguage = "zh") {
   return validateInstructionDocument(value, {
-    requestedTargetLanguage: "zh",
+    requestedTargetLanguage,
     sourceDurationSeconds: 12,
     frameReferences,
   });
@@ -60,8 +73,86 @@ test("validateInstructionDocument accepts and trims a valid document", () => {
   assert.equal(document.title, "Make a product demo");
   assert.equal(document.targetLanguage, "zh");
   assert.equal(document.steps.length, 1);
-  assert.equal(document.steps[0].cautions.length, 1);
-  assert.equal(document.checklist.length, 3);
+  assert.equal(document.steps[0].inspectionCriteria.length, 2);
+  assert.equal(document.finalInspectionChecklist.length, 3);
+  assert.equal(document.maintenanceRecommendations.length, 1);
+  assert.equal(document.steps[0].keyFrame.visualFrameIndex, 2);
+});
+
+test("validateInstructionDocument accepts a valid English document", () => {
+  const document = validate(
+    validDocument({
+      title: "Machine start-up checklist",
+      overview: "This guide explains safe startup procedures.",
+      targetLanguage: "en",
+      safetyPrecautions: ["Wear approved PPE before operation."],
+      requiredToolsAndComponents: ["Torque wrench", "Inspection light"],
+      finalInspectionChecklist: [
+        "Verify safety interlocks are active.",
+        "Confirm startup flow is complete.",
+        "Log operator and shift completion time.",
+      ],
+      maintenanceRecommendations: ["Close the access panel after startup checks."],
+      steps: [
+        {
+          ...validDocument().steps[0],
+          title: "Inspect startup panel",
+          purpose: "Ensure controls are ready before power on.",
+          procedure:
+            "Check the panel indicators and confirm all selector switches are in the correct position.",
+          inspectionCriteria: [
+            "All warning lights are green.",
+            "No selector switch is in emergency reset.",
+          ],
+          importantNotes: ["Pause if any gauge oscillates beyond expected range."],
+          keyFrame: {
+            ...validDocument().steps[0].keyFrame,
+            visualFrameIndex: 1,
+            timestampSeconds: 0,
+          },
+        },
+      ],
+    }),
+    "en"
+  );
+
+  assert.equal(document.targetLanguage, "en");
+});
+
+test("validateInstructionDocument rejects documents missing required manual sections", () => {
+  const requiredFields: Array<keyof InstructionDocument> = [
+    "overview",
+    "safetyPrecautions",
+    "requiredToolsAndComponents",
+    "finalInspectionChecklist",
+    "maintenanceRecommendations",
+    "steps",
+  ];
+
+  for (const field of requiredFields) {
+    const withoutField = validDocument() as Record<string, unknown>;
+    delete withoutField[field];
+
+    assert.throws(
+      () => validate(withoutField),
+      InstructionDocumentValidationError
+    );
+  }
+});
+
+test("validateInstructionDocument allows optional empty important notes", () => {
+  const document = validate(
+    validDocument({
+      steps: [
+        {
+          ...validDocument().steps[0],
+          importantNotes: [],
+        },
+      ],
+    })
+  );
+
+  assert.equal(document.steps[0].importantNotes.length, 0);
   assert.equal(document.steps[0].keyFrame.visualFrameIndex, 2);
 });
 
@@ -83,7 +174,7 @@ test("validateInstructionDocument rejects empty steps", () => {
   );
 });
 
-test("validateInstructionDocument rejects empty step cautions", () => {
+test("validateInstructionDocument rejects empty inspectionCriteria", () => {
   assert.throws(
     () =>
       validate(
@@ -91,19 +182,19 @@ test("validateInstructionDocument rejects empty step cautions", () => {
           steps: [
             {
               ...validDocument().steps[0],
-              cautions: [],
+              inspectionCriteria: [],
             },
           ],
         })
       ),
-    /cautions must contain at least 1 item/
+    /inspectionCriteria must contain at least 1 item/
   );
 });
 
-test("validateInstructionDocument rejects short final checklists", () => {
+test("validateInstructionDocument rejects short finalInspectionChecklist", () => {
   assert.throws(
-    () => validate(validDocument({ checklist: ["Confirm the result."] })),
-    /checklist must contain at least 3 item/
+    () => validate(validDocument({ finalInspectionChecklist: ["Confirm the result."] })),
+    /finalInspectionChecklist must contain at least 3 item/
   );
 });
 
@@ -166,7 +257,7 @@ test("validateInstructionDocument rejects unsafe customer cautions", () => {
           steps: [
             {
               ...validDocument().steps[0],
-              cautions: ["Click <button>Start</button>."],
+              inspectionCriteria: ["Click <button>Start</button>."],
             },
           ],
         })
