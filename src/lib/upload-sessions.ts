@@ -20,14 +20,6 @@ type RawUploadSessionBody = {
   videos?: unknown;
 };
 
-type RawSingleVideoUploadBody = {
-  filename?: unknown;
-  contentType?: unknown;
-  size?: unknown;
-  prompt?: unknown;
-  targetLanguage?: unknown;
-};
-
 export type UploadSessionVideoInput = Omit<
   VideoUploadInput,
   "batchId" | "batchPosition"
@@ -57,13 +49,6 @@ export type UploadSessionRecord = {
   statusUrl: string;
   totalVideos: number;
   videos: VideoUploadRecord[];
-};
-
-export type SingleVideoUploadSessionRecord = {
-  videoId: string;
-  uploadUrl: string;
-  batchId: string;
-  statusUrl: string;
 };
 
 export type UploadSessionDependencies = {
@@ -174,42 +159,6 @@ export function parseCreateUploadSessionBody(
   };
 }
 
-export function parseSingleVideoUploadSessionBody(
-  body: RawSingleVideoUploadBody
-): CreateUploadSessionInput {
-  const filename = getTrimmedString(body.filename);
-  const contentType = getTrimmedString(body.contentType);
-  const targetLanguage = getTrimmedString(body.targetLanguage);
-
-  if (!filename || !contentType || !targetLanguage) {
-    throw new UploadValidationError(
-      "Missing required fields: filename, contentType, and targetLanguage are required"
-    );
-  }
-
-  if (typeof body.size !== "number") {
-    throw new UploadValidationError("size must be a positive integer");
-  }
-
-  const prompt = normalizePrompt(body.prompt);
-  const video = {
-    filename,
-    contentType,
-    size: body.size,
-    prompt,
-    targetLanguage,
-  };
-
-  assertValidVideoUploadInput(video);
-
-  return {
-    title: filename,
-    targetLanguage,
-    prompt,
-    videos: [video],
-  };
-}
-
 function defaultUploadSessionDependencies(): UploadSessionDependencies {
   return {
     async createBatch(input) {
@@ -263,31 +212,5 @@ export async function createUploadSession(
     statusUrl: `/video-batches/${batch.id}`,
     totalVideos: videos.length,
     videos,
-  };
-}
-
-export async function createSingleVideoUploadSession(
-  body: RawSingleVideoUploadBody,
-  dependencies?: UploadSessionDependencies,
-  userId?: string
-): Promise<SingleVideoUploadSessionRecord> {
-  const session = await createUploadSession(
-    {
-      ...parseSingleVideoUploadSessionBody(body),
-      userId,
-    },
-    dependencies
-  );
-  const upload = session.videos[0];
-
-  if (!upload) {
-    throw new Error("Upload session did not create a video");
-  }
-
-  return {
-    videoId: upload.videoId,
-    uploadUrl: upload.uploadUrl,
-    batchId: session.batchId,
-    statusUrl: session.statusUrl,
   };
 }

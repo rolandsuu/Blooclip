@@ -6,7 +6,6 @@ process.env.SUPABASE_SECRET_KEY ??= "test-service-key";
 
 const {
   UploadValidationError,
-  createSingleVideoUploadSession,
   createUploadSession,
   parseCreateUploadSessionBody,
 } = await import("./upload-sessions.ts");
@@ -164,47 +163,6 @@ test("provided upload session titles override the filename default", () => {
   });
 
   assert.equal(input.title, "Customer onboarding");
-});
-
-test("old single-video upload request wraps into a one-video session", async () => {
-  const result = await createSingleVideoUploadSession(
-    {
-      filename: "legacy.mp4",
-      contentType: "video/mp4",
-      size: 2048,
-      prompt: "Legacy prompt",
-      targetLanguage: "zh",
-    },
-    {
-      async createBatch(batch) {
-        assert.deepEqual(batch, {
-          title: "legacy.mp4",
-          targetLanguage: "zh",
-          expectedVideoCount: 1,
-        });
-        return { id: "legacy-batch" };
-      },
-      async createVideo(upload) {
-        assert.equal(upload.batchId, "legacy-batch");
-        assert.equal(upload.batchPosition, 0);
-        assert.equal(upload.prompt, "Legacy prompt");
-
-        return {
-          videoId: "legacy-video",
-          uploadUrl: "https://upload.test/legacy",
-          filename: upload.filename,
-          batchPosition: upload.batchPosition ?? null,
-        };
-      },
-    }
-  );
-
-  assert.deepEqual(result, {
-    videoId: "legacy-video",
-    uploadUrl: "https://upload.test/legacy",
-    batchId: "legacy-batch",
-    statusUrl: "/video-batches/legacy-batch",
-  });
 });
 
 test("upload session validation errors keep their HTTP status", () => {
