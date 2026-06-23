@@ -50,7 +50,7 @@ test("getProcessingDisplay hides raw provider error messages from visible copy",
   });
 
   assert.equal(display.title, "处理失败");
-  assert.equal(display.detail, "Blooclip 没能完成这个视频。请重新上传后再试。");
+  assert.equal(display.detail, "Volts24 没能完成这个视频。请重新上传后再试。");
   assert.equal(display.tone, "error");
 });
 
@@ -87,7 +87,7 @@ test("getProcessingDisplay falls back safely for unknown stages", () => {
   });
 
   assert.equal(display.title, "AI 正在处理");
-  assert.equal(display.detail, "Blooclip 正在处理这个视频。");
+  assert.equal(display.detail, "Volts24 正在处理这个视频。");
   assert.equal(display.tone, "active");
   assert.equal(display.progress, 100);
 });

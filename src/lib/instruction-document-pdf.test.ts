@@ -59,7 +59,7 @@ function sampleArtifact(): InstructionDocumentArtifact {
 }
 
 test("renderInstructionDocumentPdf writes a non-empty PDF", async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "blooclip-pdf-test-"));
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "volts24-pdf-test-"));
   const outputPath = path.join(tmpDir, "instructions.pdf");
 
   try {
@@ -79,7 +79,7 @@ test("renderInstructionDocumentPdf writes a non-empty PDF", async () => {
 });
 
 test("renderInstructionDocumentPdf excludes restricted text from output structure", async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "blooclip-pdf-test-"));
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "volts24-pdf-test-"));
   const outputPath = path.join(tmpDir, "instructions.pdf");
 
   try {
@@ -113,7 +113,7 @@ test("renderInstructionDocumentPdf excludes restricted text from output structur
 });
 
 test("renderInstructionDocumentPdf does not require PDFKit Helvetica AFM data", async () => {
-  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "blooclip-pdf-test-"));
+  const tmpDir = await mkdtemp(path.join(os.tmpdir(), "volts24-pdf-test-"));
   const outputPath = path.join(tmpDir, "instructions.pdf");
   const originalReadFileSync = fs.readFileSync;
 

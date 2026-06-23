@@ -626,7 +626,7 @@ export async function addSmoothBouncingWatermark(
   const crf = options.crf ?? DEFAULT_CRF;
   const preset = options.preset ?? DEFAULT_PRESET;
   const tempParentDir = options.workDir ?? os.tmpdir();
-  const tempDir = await mkdtemp(path.join(tempParentDir, "blooclip-watermark-"));
+  const tempDir = await mkdtemp(path.join(tempParentDir, "volts24-watermark-"));
   const assPath = path.join(tempDir, "watermark.ass");
 
   try {

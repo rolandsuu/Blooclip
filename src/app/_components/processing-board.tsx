@@ -146,7 +146,7 @@ export function ProcessingBoard({
             </span>
           </div>
           <p className="mt-1 text-sm leading-6 text-black/60">
-            Blooclip 会实时显示当前任务。
+            Volts24 会实时显示当前任务。
           </p>
         </div>
       </div>

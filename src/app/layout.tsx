@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Blooclip",
+  title: "Volts24",
   description: "AI 原生教程视频生成工具。",
 };
 

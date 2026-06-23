@@ -349,7 +349,7 @@ export function AppHeader() {
           <LogoMark />
           <div className="flex min-w-0 items-center gap-4">
             <p className="truncate text-2xl font-bold tracking-tight text-[#11131a]">
-              Blooclip
+              Volts24
             </p>
             <span className="hidden h-7 w-px bg-[#d5dbe5] sm:block" />
             <p className="hidden text-base font-medium text-[#586273] sm:block">
@@ -530,7 +530,7 @@ export function UploadForm({
           disabled={!canGenerate}
           className="mt-1 h-[52px] rounded-lg bg-[#090a0d] px-6 text-base font-bold text-white shadow-sm shadow-black/20 transition hover:bg-black focus:outline-none focus:ring-4 focus:ring-black/15 disabled:cursor-not-allowed disabled:bg-[#aeb7c5] disabled:shadow-none"
         >
-          {isSubmitting ? getSubmitLabel(uploadItems) : "生成"}
+          {isSubmitting ? getSubmitLabel(uploadItems) : "一键剪辑"}
         </button>
       </form>
     </section>

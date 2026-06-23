@@ -84,7 +84,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">
-              登录 Blooclip
+              登录 Volts24
             </h1>
             <p className="mt-2 text-sm leading-6 text-black/55">
               使用邮箱保存视频任务，之后可以继续查看。
@@ -115,7 +115,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
         {sent && (
           <p className="rounded-md border border-black/10 bg-black/[0.025] p-3 text-sm leading-6 text-black/65">
-            请打开 {email ?? "你的邮箱"} 查看 Blooclip 登录链接。
+            请打开 {email ?? "你的邮箱"} 查看 Volts24 登录链接。
           </p>
         )}
 

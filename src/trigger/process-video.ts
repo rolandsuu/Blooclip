@@ -36,6 +36,7 @@ import {
   buildSubtitleCues,
   SubtitleCueGenerationError,
 } from "../lib/subtitle-cues";
+import { DEFAULT_UPLOAD_PROMPT } from "../lib/upload-settings";
 import { addSmoothBouncingWatermark } from "../lib/smooth-bouncing-watermark";
 import { supabaseAdmin } from "../lib/supabase-admin";
 import { getTargetLanguageCode } from "../lib/target-language";
@@ -1662,7 +1663,7 @@ async function submitTwelveLabsAnalysisTask(options: {
   targetLanguage: string;
 }) {
   const { apiKey, baseUrl, model } = getTwelveLabsConfig();
-  const customId = `blooclip_${options.videoId}`
+  const customId = `volts24_${options.videoId}`
     .replace(/[^a-zA-Z0-9_-]/g, "_")
     .slice(0, 64);
   const response = await fetch(`${baseUrl}/analyze/tasks`, {
@@ -2138,7 +2139,7 @@ async function analyzeVideoEvents(options: {
       file: options.inputPath,
       config: {
         mimeType: options.originalContentType,
-        displayName: `blooclip-${options.videoId}`,
+        displayName: `volts24-${options.videoId}`,
       },
     });
     const activeFile = await waitForGeminiFile(
@@ -4643,7 +4644,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
   let openAiTtsRequestId: string | null = null;
   let assemblyAiVoiceoverTranscriptId: string | null = null;
   const workDir = await mkdtemp(
-    path.join(os.tmpdir(), `blooclip-${payload.videoId}-`)
+    path.join(os.tmpdir(), `volts24-${payload.videoId}-`)
   );
   const inputPath = path.join(workDir, "input.mp4");
   const audioPath = path.join(workDir, "audio.wav");
@@ -4675,7 +4676,7 @@ export async function runProcessVideo(payload: ProcessVideoPayload) {
     const prompt =
       typeof video.prompt === "string" && video.prompt.trim()
         ? video.prompt.trim()
-        : "Create a key-event video with voiceover and subtitles";
+        : DEFAULT_UPLOAD_PROMPT;
     const targetLanguage =
       typeof video.target_language === "string" && video.target_language.trim()
         ? video.target_language.trim()
