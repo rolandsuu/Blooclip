@@ -1,5 +1,5 @@
 export const DEFAULT_UPLOAD_PROMPT =
-  "生成带旁白和字幕的关键事件视频";
+  "识别视频中最重要的操作步骤和关键画面，剪成一段结构清晰的教学短片，并添加自然旁白和字幕。";
 
 export const MAX_BATCH_UPLOAD_FILES = 10;
 

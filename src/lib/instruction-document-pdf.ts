@@ -326,7 +326,7 @@ export async function renderInstructionDocumentPdf({
       info: {
         Title: document.title,
         Subject: copy.guideLabel,
-        Creator: "Blooclip",
+        Creator: "Volts24",
       },
     });
     const output = createWriteStream(outputPath);

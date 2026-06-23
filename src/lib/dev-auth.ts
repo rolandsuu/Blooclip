@@ -18,7 +18,7 @@ export function isAuthDisabled() {
 export function createDevBypassUser(): DevBypassUser {
   return {
     id: "local-dev",
-    email: "local-dev@blooclip.local",
+    email: "local-dev@volts24.local",
     isDevBypass: true,
   };
 }

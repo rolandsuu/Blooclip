@@ -34,15 +34,15 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   selected: {
     title: "已选择视频",
-    detail: "确认视频后发送给 Blooclip。",
+    detail: "确认视频后发送给 Volts24。",
   },
   uploaded: {
     title: "准备开始",
-    detail: "上传已准备好，Blooclip 可以开始 AI 处理。",
+    detail: "上传已准备好，Volts24 可以开始 AI 处理。",
   },
   creating_upload: {
     title: "正在准备上传",
-    detail: "Blooclip 正在为视频创建安全上传链接。",
+    detail: "Volts24 正在为视频创建安全上传链接。",
   },
   uploading: {
     title: "正在上传视频",
@@ -50,7 +50,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   marking_failed: {
     title: "正在保存上传错误",
-    detail: "Blooclip 正在记录需要重试的上传。",
+    detail: "Volts24 正在记录需要重试的上传。",
   },
   queueing: {
     title: "正在启动 AI 处理",
@@ -58,7 +58,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   redirecting: {
     title: "正在打开批量状态",
-    detail: "Blooclip 正在打开后续处理页面。",
+    detail: "Volts24 正在打开后续处理页面。",
   },
   queued: {
     title: "等待 AI 处理器",
@@ -66,11 +66,11 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   downloading_source: {
     title: "正在打开视频",
-    detail: "Blooclip 正在加载源文件用于处理。",
+    detail: "Volts24 正在加载源文件用于处理。",
   },
   extracting_audio: {
     title: "正在读取音频",
-    detail: "Blooclip 正在从视频中分离声音。",
+    detail: "Volts24 正在从视频中分离声音。",
   },
   transcribing_audio: {
     title: "正在生成转写",
@@ -90,7 +90,7 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   sampling_frames: {
     title: "正在截取画面",
-    detail: "Blooclip 正在提取画面，让 AI 理解场景。",
+    detail: "Volts24 正在提取画面，让 AI 理解场景。",
   },
   analyzing_visuals: {
     title: "正在理解视频",
@@ -122,11 +122,11 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   generating_voiceover: {
     title: "正在生成旁白",
-    detail: "Blooclip 正在创建解说音轨。",
+    detail: "Volts24 正在创建解说音轨。",
   },
   building_subtitles: {
     title: "正在制作字幕",
-    detail: "Blooclip 正在把字幕和旁白对齐。",
+    detail: "Volts24 正在把字幕和旁白对齐。",
   },
   voiceover_subtitles_ready: {
     title: "旁白和字幕已完成",
@@ -134,15 +134,15 @@ const STAGE_COPY: Record<string, StageCopy> = {
   },
   cutting_clips: {
     title: "正在剪辑片段",
-    detail: "Blooclip 正在组装选中的视频时刻。",
+    detail: "Volts24 正在组装选中的视频时刻。",
   },
   rendering_final: {
     title: "正在渲染最终视频",
-    detail: "Blooclip 正在合成视频、旁白和字幕。",
+    detail: "Volts24 正在合成视频、旁白和字幕。",
   },
   uploading_final: {
     title: "正在保存最终视频",
-    detail: "Blooclip 正在上传完成的 MP4。",
+    detail: "Volts24 正在上传完成的 MP4。",
   },
   completed: {
     title: "最终视频已完成",
@@ -234,7 +234,7 @@ export function getProcessingDisplay(
       input,
       {
         title: "处理失败",
-        detail: "Blooclip 没能完成这个视频。请重新上传后再试。",
+        detail: "Volts24 没能完成这个视频。请重新上传后再试。",
       },
       "error"
     );
@@ -260,7 +260,7 @@ export function getProcessingDisplay(
     input,
     {
       title: "AI 正在处理",
-      detail: "Blooclip 正在处理这个视频。",
+      detail: "Volts24 正在处理这个视频。",
     },
     status === "queued" || status === "processing" ? "active" : "idle"
   );
