@@ -5,6 +5,7 @@ import {
   buildAssInstructionOverlayFile,
   buildAssSubtitleFile,
   buildClipScalePadFilters,
+  buildOptionalCropFilters,
   DEFAULT_SUBTITLE_FONT_FAMILY,
   normalizeRenderDimensions,
   readRenderDimensionsFromFfprobe,
@@ -48,6 +49,25 @@ test("readRenderDimensionsFromFfprobe preserves portrait source size", () => {
     "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
     "setsar=1",
   ]);
+});
+
+test("buildOptionalCropFilters normalizes sample aspect ratio after crop", () => {
+  assert.deepEqual(
+    buildOptionalCropFilters(
+      {
+        type: "subtle_zoom",
+        scale: 1.06,
+        xPercent: 20,
+        yPercent: 0,
+      },
+      { width: 1920, height: 1080 }
+    ),
+    [
+      "scale=ceil(iw*1.0600/2)*2:ceil(ih*1.0600/2)*2",
+      "crop=1920:1080:(iw-1920)*0.6000:(ih-1080)*0.5000",
+      "setsar=1",
+    ]
+  );
 });
 
 test("buildAssSubtitleFile uses render dimensions and scales style", () => {

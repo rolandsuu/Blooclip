@@ -15,6 +15,13 @@ export type InstructionOverlayCue = {
   text: string;
 };
 
+export type OptionalCropFilterInput = {
+  type: "none" | "subtle_zoom";
+  scale: number;
+  xPercent: number;
+  yPercent: number;
+};
+
 export type AssSubtitleOptions = {
   fontFamily?: string;
 };
@@ -175,6 +182,26 @@ export function buildClipScalePadFilters(renderDimensions: RenderDimensions) {
   return [
     `scale=${dimensions.width}:${dimensions.height}:force_original_aspect_ratio=decrease`,
     `pad=${dimensions.width}:${dimensions.height}:(ow-iw)/2:(oh-ih)/2`,
+    "setsar=1",
+  ];
+}
+
+export function buildOptionalCropFilters(
+  optionalCrop: OptionalCropFilterInput | null | undefined,
+  renderDimensions: RenderDimensions
+) {
+  if (!optionalCrop || optionalCrop.type !== "subtle_zoom") {
+    return [];
+  }
+
+  const dimensions = normalizeRenderDimensions(renderDimensions);
+  const scale = optionalCrop.scale.toFixed(4);
+  const xBias = (0.5 + optionalCrop.xPercent / 200).toFixed(4);
+  const yBias = (0.5 + optionalCrop.yPercent / 200).toFixed(4);
+
+  return [
+    `scale=ceil(iw*${scale}/2)*2:ceil(ih*${scale}/2)*2`,
+    `crop=${dimensions.width}:${dimensions.height}:(iw-${dimensions.width})*${xBias}:(ih-${dimensions.height})*${yBias}`,
     "setsar=1",
   ];
 }

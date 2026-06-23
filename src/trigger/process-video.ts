@@ -49,6 +49,7 @@ import { buildVoiceoverAlignmentFromTranscript } from "../lib/voiceover-alignmen
 import {
   buildAssSubtitleFile,
   buildClipScalePadFilters,
+  buildOptionalCropFilters,
   readRenderDimensionsFromFfprobe,
   type RenderDimensions,
   type SubtitleCue,
@@ -3934,25 +3935,6 @@ function getRenderSegments(
       optionalCrop: overlaySegment?.optionalCrop ?? null,
     };
   });
-}
-
-function buildOptionalCropFilters(
-  optionalCrop: RenderSegment["optionalCrop"],
-  renderDimensions: RenderDimensions
-) {
-  if (!optionalCrop || optionalCrop.type !== "subtle_zoom") {
-    return [];
-  }
-
-  const dimensions = renderDimensions;
-  const scale = optionalCrop.scale.toFixed(4);
-  const xBias = (0.5 + optionalCrop.xPercent / 200).toFixed(4);
-  const yBias = (0.5 + optionalCrop.yPercent / 200).toFixed(4);
-
-  return [
-    `scale=ceil(iw*${scale}/2)*2:ceil(ih*${scale}/2)*2`,
-    `crop=${dimensions.width}:${dimensions.height}:(iw-${dimensions.width})*${xBias}:(ih-${dimensions.height})*${yBias}`,
-  ];
 }
 
 async function assertNonEmptyFile(filePath: string, options: {
