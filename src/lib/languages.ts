@@ -47,7 +47,7 @@ export const TARGET_LANGUAGE_OPTIONS = [
 
 export const DEFAULT_TARGET_LANGUAGE = TARGET_LANGUAGE_OPTIONS[0].value;
 
-const TARGET_LANGUAGE_LABELS_BY_CODE = new Map(
+const TARGET_LANGUAGE_LABELS_BY_CODE: ReadonlyMap<string, string> = new Map(
   TARGET_LANGUAGE_OPTIONS.map((option) => [option.value, option.label])
 );
 
