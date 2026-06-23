@@ -73,8 +73,7 @@ export function useUploadSession() {
     () => selectedUploads.reduce((total, item) => total + item.size, 0),
     [selectedUploads]
   );
-  const canGenerate =
-    selectedUploads.length > 0 && prompt.trim().length > 0 && !isSubmitting;
+  const canGenerate = selectedUploads.length > 0 && !isSubmitting;
 
   useEffect(() => {
     let active = true;
@@ -394,7 +393,7 @@ export function useUploadSession() {
       return;
     }
 
-    const trimmedPrompt = prompt.trim();
+    const trimmedPrompt = prompt.trim() || null;
     const uploads = selectedUploads;
 
     setIsSubmitting(true);

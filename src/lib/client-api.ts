@@ -62,6 +62,12 @@ export type UploadSessionResponse = {
 
 const R2_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
+function buildPromptRequestBody(prompt: string | null | undefined) {
+  const trimmedPrompt = typeof prompt === "string" ? prompt.trim() : "";
+
+  return trimmedPrompt ? { prompt: trimmedPrompt } : {};
+}
+
 export async function readErrorMessage(response: Response, fallback: string) {
   await response.text().catch(() => "");
   return fallback;
@@ -130,7 +136,7 @@ function parseUploadSessionResponse(value: unknown): UploadSessionResponse {
 
 export async function createUploadSession(
   selectedUploads: ClientUploadRequestFile[],
-  prompt: string,
+  prompt: string | null | undefined,
   targetLanguage: string
 ) {
   const response = await fetch("/api/video-batches/create-upload", {
@@ -140,7 +146,7 @@ export async function createUploadSession(
     },
     body: JSON.stringify({
       targetLanguage,
-      prompt,
+      ...buildPromptRequestBody(prompt),
       videos: selectedUploads.map((selection) => ({
         filename: selection.filename,
         contentType: selection.contentType,
@@ -238,7 +244,10 @@ export async function markUploadFailed(videoId: string, error: string) {
   }
 }
 
-export async function completeBatchUpload(batchId: string, prompt: string) {
+export async function completeBatchUpload(
+  batchId: string,
+  prompt: string | null | undefined
+) {
   const response = await fetch(
     `/api/video-batches/${encodeURIComponent(batchId)}/complete-upload`,
     {
@@ -246,7 +255,7 @@ export async function completeBatchUpload(batchId: string, prompt: string) {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify(buildPromptRequestBody(prompt)),
     }
   );
 

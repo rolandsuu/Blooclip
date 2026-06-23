@@ -492,7 +492,6 @@ export function UploadForm({
             value={prompt}
             onChange={(event) => onPromptChange(event.target.value)}
             rows={4}
-            required
             disabled={isSubmitting}
             placeholder="详细描述您的视频内容，AI视频生成的效果会更好哦！"
             className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5 disabled:cursor-not-allowed disabled:bg-[#eef1f6] disabled:text-[#6f7785]"
