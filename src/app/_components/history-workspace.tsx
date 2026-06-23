@@ -24,20 +24,26 @@ export function HistoryWorkspace() {
         isLoading={historySession.isLoadingHistory}
         message={historySession.historyMessage}
         activeBatchId={historySession.activeBatchId}
+        activeContent={
+          historySession.activeBatchId ? (
+            <UploadProgressList
+              items={historySession.uploadItems}
+              batchStatus={historySession.batchStatus}
+              statusMessage={historySession.batchStatusMessage}
+              downloadingVideoId={historySession.downloadingVideoId}
+              downloadingInstructionPdfId={
+                historySession.downloadingInstructionPdfId
+              }
+              retryingVideoId={historySession.retryingVideoId}
+              onDownloadVideo={historySession.downloadVideo}
+              onDownloadInstructionPdf={historySession.downloadInstructionPdf}
+              onRetryProcessing={historySession.retryProcessing}
+              layout="drawer"
+            />
+          ) : null
+        }
         showEmptyState
         onSelect={historySession.openHistoryBatch}
-      />
-
-      <UploadProgressList
-        items={historySession.uploadItems}
-        batchStatus={historySession.batchStatus}
-        statusMessage={historySession.batchStatusMessage}
-        downloadingVideoId={historySession.downloadingVideoId}
-        downloadingInstructionPdfId={historySession.downloadingInstructionPdfId}
-        retryingVideoId={historySession.retryingVideoId}
-        onDownloadVideo={historySession.downloadVideo}
-        onDownloadInstructionPdf={historySession.downloadInstructionPdf}
-        onRetryProcessing={historySession.retryProcessing}
       />
     </main>
   );

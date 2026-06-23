@@ -235,16 +235,28 @@ export function useUploadSession({
   }
 
   function openHistoryBatch(batchId: string) {
+    if (activeBatchId === batchId) {
+      setActiveBatchId(null);
+      setBatchStatus(null);
+      setBatchStatusMessage(null);
+      pendingResultScrollRef.current = false;
+      setDownloadingVideoId(null);
+      setDownloadingInstructionPdfId(null);
+      setRetryingVideoId(null);
+      return;
+    }
+
     setSelectedUploads([]);
     setRejectedItems([]);
     setUploadItems([]);
     setActiveBatchId(batchId);
     setBatchStatus(null);
     setBatchStatusMessage("正在加载任务...");
-    pendingResultScrollRef.current = true;
+    pendingResultScrollRef.current = false;
     setFormError(null);
     setDownloadingVideoId(null);
     setDownloadingInstructionPdfId(null);
+    setRetryingVideoId(null);
   }
 
   function chooseVideos(event: ChangeEvent<HTMLInputElement>) {

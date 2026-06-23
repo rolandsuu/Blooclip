@@ -1,5 +1,5 @@
 import Link from "next/link";
-import type { ChangeEvent, DragEvent, FormEvent } from "react";
+import type { ChangeEvent, DragEvent, FormEvent, ReactNode } from "react";
 
 import {
   TARGET_LANGUAGE_OPTIONS,
@@ -545,6 +545,7 @@ type RecentJobsProps = {
   isLoading: boolean;
   message: string | null;
   activeBatchId: string | null;
+  activeContent?: ReactNode;
   showEmptyState?: boolean;
   onSelect(batchId: string): void;
 };
@@ -554,6 +555,7 @@ export function RecentJobs({
   isLoading,
   message,
   activeBatchId,
+  activeContent,
   showEmptyState = false,
   onSelect,
 }: RecentJobsProps) {
@@ -603,44 +605,73 @@ export function RecentJobs({
             <ul aria-live="polite">
               {items.map((item) => {
                 const isActive = item.id === activeBatchId;
+                const drawerId = `history-drawer-${item.id}`;
 
                 return (
                   <li
                     key={item.id}
-                    className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_180px_120px] md:items-center md:gap-5"
+                    className="border-t border-[#dce1ea] first:border-t-0"
                   >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="truncate text-sm font-bold text-[#11131a]">
-                          {item.title}
-                        </p>
-                        <span
-                          className={cx(
-                            "rounded border px-2 py-0.5 text-xs font-semibold",
-                            getHistoryStatusClasses(item.status)
-                          )}
-                        >
-                          {getHistoryStatusLabel(item.status)}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-sm text-[#6f7785]">
-                        视频 {item.videoCount}/{item.expectedVideoCount} · 已完成{" "}
-                        {item.completedCount} · 失败 {item.failedCount}
-                      </p>
-                    </div>
-
-                    <p className="text-sm font-medium text-[#6f7785]">
-                      更新 {formatDateTime(item.updatedAt)}
-                    </p>
-
                     <button
                       type="button"
+                      aria-expanded={isActive}
+                      aria-controls={drawerId}
                       onClick={() => onSelect(item.id)}
-                      disabled={isActive}
-                      className="h-9 rounded-md border border-[#c5ccd8] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:border-[#11131a] disabled:cursor-default disabled:border-[#11131a] disabled:bg-[#11131a] disabled:text-white"
+                      className={cx(
+                        "grid w-full gap-4 px-4 py-4 text-left transition focus:outline-none focus:ring-4 focus:ring-inset focus:ring-[#11131a]/10 md:grid-cols-[minmax(0,1fr)_180px_32px] md:items-center md:gap-5",
+                        isActive
+                          ? "bg-[#f4f6fa]"
+                          : "bg-white hover:bg-[#fbfcfe]"
+                      )}
                     >
-                      {isActive ? "已打开" : "打开"}
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-bold text-[#11131a]">
+                            {item.title}
+                          </p>
+                          <span
+                            className={cx(
+                              "rounded border px-2 py-0.5 text-xs font-semibold",
+                              getHistoryStatusClasses(item.status)
+                            )}
+                          >
+                            {getHistoryStatusLabel(item.status)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm text-[#6f7785]">
+                          视频 {item.videoCount}/{item.expectedVideoCount} · 已完成{" "}
+                          {item.completedCount} · 失败 {item.failedCount}
+                        </p>
+                      </div>
+
+                      <p className="text-sm font-medium text-[#6f7785]">
+                        更新 {formatDateTime(item.updatedAt)}
+                      </p>
+
+                      <span
+                        className={cx(
+                          "flex h-8 w-8 items-center justify-center rounded-full border border-[#c5ccd8] text-[#586273] transition justify-self-start md:justify-self-end",
+                          isActive && "border-[#11131a] bg-[#11131a] text-white"
+                        )}
+                        aria-hidden="true"
+                      >
+                        <ChevronDownIcon
+                          className={cx(
+                            "h-4 w-4 transition-transform",
+                            isActive && "rotate-180"
+                          )}
+                        />
+                      </span>
                     </button>
+
+                    {isActive && activeContent && (
+                      <div
+                        id={drawerId}
+                        className="border-t border-[#dce1ea] bg-[#fbfcfe] px-4 py-4 sm:px-5"
+                      >
+                        {activeContent}
+                      </div>
+                    )}
                   </li>
                 );
               })}
@@ -662,7 +693,179 @@ type UploadProgressListProps = {
   onDownloadVideo(videoId: string): void;
   onDownloadInstructionPdf(videoId: string): void;
   onRetryProcessing(videoId: string): void;
+  layout?: "section" | "drawer";
 };
+
+type UploadProgressRowsProps = Omit<
+  UploadProgressListProps,
+  "items" | "statusMessage" | "layout"
+> & {
+  rows: UploadProgressItem[];
+  className?: string;
+};
+
+function UploadProgressRows({
+  rows,
+  batchStatus,
+  downloadingVideoId,
+  downloadingInstructionPdfId,
+  retryingVideoId,
+  onDownloadVideo,
+  onDownloadInstructionPdf,
+  onRetryProcessing,
+  className,
+}: UploadProgressRowsProps) {
+  const videosById = new Map(
+    (batchStatus?.videos ?? []).map((video) => [video.id, video])
+  );
+
+  return (
+    <div
+      className={cx(
+        "overflow-hidden rounded-lg border border-[#cfd6e1] bg-white",
+        className
+      )}
+    >
+      <div className="hidden grid-cols-[minmax(0,1fr)_220px_190px_170px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
+        <span>视频</span>
+        <span>状态</span>
+        <span>进度</span>
+        <span>操作</span>
+      </div>
+
+      <ul aria-live="polite">
+        {rows.map((item) => {
+          const batchVideo = item.videoId ? videosById.get(item.videoId) : null;
+          const filename = batchVideo?.filename ?? item.filename;
+          const contentType = batchVideo?.contentType ?? item.contentType;
+          const size = batchVideo?.size ?? item.size;
+          const display = batchVideo
+            ? getProcessingDisplay({
+                status: batchVideo.status,
+                currentStage: batchVideo.currentStage,
+                progress: batchVideo.progress,
+                errorMessage: batchVideo.errorMessage,
+              })
+            : null;
+          const tone = display
+            ? getProcessingListClasses(display.tone)
+            : getPhaseClasses(item.phase);
+          const progress = Math.max(
+            0,
+            Math.min(100, display ? display.progress : item.progress)
+          );
+          const statusTitle = display ? display.title : getPhaseLabel(item.phase);
+          const statusDetail =
+            display?.detail ?? batchVideo?.errorMessage ?? item.message;
+          const canDownloadVideo = Boolean(batchVideo?.downloadReady);
+          const canDownloadInstructionPdf = Boolean(
+            batchVideo?.instructionPdfReady
+          );
+          const isDownloadingVideo = batchVideo?.id === downloadingVideoId;
+          const isDownloadingInstructionPdf =
+            batchVideo?.id === downloadingInstructionPdfId;
+          const canRetryProcessing = Boolean(
+            batchVideo?.status === "failed" && batchVideo.retryable
+          );
+          const isRetryingProcessing = batchVideo?.id === retryingVideoId;
+
+          return (
+            <li
+              key={item.id}
+              className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_220px_190px_170px] md:items-center md:gap-5"
+            >
+              <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
+                <FileThumb />
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold text-[#11131a]">
+                    {filename}
+                  </p>
+                  <p className="mt-1 text-sm text-[#6f7785]">
+                    {formatVideoMeta(size, contentType)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
+                  <span className={cx("text-sm font-semibold", tone.text)}>
+                    {statusTitle}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#6f7785]">
+                  {statusDetail}
+                </p>
+              </div>
+
+              <div className="grid grid-cols-[44px_1fr] items-center gap-3">
+                <span className="font-mono text-sm font-semibold text-[#11131a]">
+                  {item.phase === "creating" ? "-" : `${progress}%`}
+                </span>
+                <div className="h-2 overflow-hidden rounded-full bg-[#e2e6ed]">
+                  <div
+                    className={cx(
+                      "h-full rounded-full transition-all duration-500",
+                      tone.bar
+                    )}
+                    style={{
+                      width: `${
+                        !display && item.phase === "creating" ? 0 : progress
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 md:grid">
+                {canDownloadVideo && batchVideo && (
+                  <button
+                    type="button"
+                    onClick={() => onDownloadVideo(batchVideo.id)}
+                    disabled={isDownloadingVideo}
+                    className="h-9 rounded-md bg-[#11131a] px-3 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:bg-[#aeb7c5]"
+                  >
+                    {isDownloadingVideo ? "准备中..." : "下载最终视频"}
+                  </button>
+                )}
+
+                {canDownloadInstructionPdf && batchVideo && (
+                  <button
+                    type="button"
+                    onClick={() => onDownloadInstructionPdf(batchVideo.id)}
+                    disabled={isDownloadingInstructionPdf}
+                    className="h-9 rounded-md border border-[#c5ccd8] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:border-[#11131a] disabled:cursor-not-allowed disabled:text-[#8a93a3]"
+                  >
+                    {isDownloadingInstructionPdf ? "准备中..." : "下载操作 PDF"}
+                  </button>
+                )}
+
+                {canRetryProcessing && batchVideo && (
+                  <button
+                    type="button"
+                    onClick={() => onRetryProcessing(batchVideo.id)}
+                    disabled={isRetryingProcessing}
+                    className="h-9 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white transition hover:bg-[#c81818] disabled:cursor-not-allowed disabled:bg-[#aeb7c5]"
+                  >
+                    {isRetryingProcessing ? "启动中..." : "重试处理"}
+                  </button>
+                )}
+
+                {!canDownloadVideo &&
+                  !canDownloadInstructionPdf &&
+                  !canRetryProcessing && (
+                    <span className="text-sm font-medium text-[#8a93a3]">
+                      等待结果
+                    </span>
+                  )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
 
 export function UploadProgressList({
   items,
@@ -674,6 +877,7 @@ export function UploadProgressList({
   onDownloadVideo,
   onDownloadInstructionPdf,
   onRetryProcessing,
+  layout = "section",
 }: UploadProgressListProps) {
   const rows =
     items.length > 0
@@ -690,13 +894,65 @@ export function UploadProgressList({
         }));
 
   if (rows.length === 0) {
+    if (layout === "drawer" && statusMessage) {
+      return (
+        <div
+          className="rounded-lg border border-[#cfd6e1] bg-white px-4 py-3 text-sm font-medium text-[#6f7785]"
+          role="status"
+        >
+          {statusMessage}
+        </div>
+      );
+    }
+
     return null;
   }
 
-  const videosById = new Map(
-    (batchStatus?.videos ?? []).map((video) => [video.id, video])
-  );
   const counts = getBatchCounts(batchStatus);
+  const countBadges = batchStatus ? (
+    <div className="flex flex-wrap gap-2 text-sm font-semibold">
+      <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
+        视频 {counts.videoCount}/{counts.totalCount}
+      </span>
+      <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
+        进行中 {counts.activeCount}
+      </span>
+      <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#198a35]">
+        已完成 {counts.completedCount}
+      </span>
+      <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#c81818]">
+        失败 {counts.failedCount}
+      </span>
+    </div>
+  ) : null;
+
+  if (layout === "drawer") {
+    return (
+      <div className="grid gap-3">
+        {(statusMessage || countBadges) && (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {statusMessage && (
+              <p className="text-sm font-medium text-[#6f7785]">
+                {statusMessage}
+              </p>
+            )}
+            {countBadges}
+          </div>
+        )}
+
+        <UploadProgressRows
+          rows={rows}
+          batchStatus={batchStatus}
+          downloadingVideoId={downloadingVideoId}
+          downloadingInstructionPdfId={downloadingInstructionPdfId}
+          retryingVideoId={retryingVideoId}
+          onDownloadVideo={onDownloadVideo}
+          onDownloadInstructionPdf={onDownloadInstructionPdf}
+          onRetryProcessing={onRetryProcessing}
+        />
+      </div>
+    );
+  }
 
   return (
     <section
@@ -716,167 +972,20 @@ export function UploadProgressList({
             )}
           </div>
 
-          {batchStatus && (
-            <div className="flex flex-wrap gap-2 text-sm font-semibold">
-              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
-                视频 {counts.videoCount}/{counts.totalCount}
-              </span>
-              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#586273]">
-                进行中 {counts.activeCount}
-              </span>
-              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#198a35]">
-                已完成 {counts.completedCount}
-              </span>
-              <span className="rounded border border-[#dce1ea] bg-[#fbfcfe] px-2.5 py-1 text-[#c81818]">
-                失败 {counts.failedCount}
-              </span>
-            </div>
-          )}
+          {countBadges}
         </div>
 
-        <div className="mt-3 overflow-hidden rounded-lg border border-[#cfd6e1] bg-white">
-          <div className="hidden grid-cols-[minmax(0,1fr)_220px_190px_170px] gap-5 border-b border-[#dce1ea] bg-[#fbfcfe] px-4 py-3 text-sm font-semibold text-[#586273] md:grid">
-            <span>视频</span>
-            <span>状态</span>
-            <span>进度</span>
-            <span>操作</span>
-          </div>
-
-          <ul aria-live="polite">
-            {rows.map((item) => {
-              const batchVideo = item.videoId ? videosById.get(item.videoId) : null;
-              const filename = batchVideo?.filename ?? item.filename;
-              const contentType = batchVideo?.contentType ?? item.contentType;
-              const size = batchVideo?.size ?? item.size;
-              const display = batchVideo
-                ? getProcessingDisplay({
-                    status: batchVideo.status,
-                    currentStage: batchVideo.currentStage,
-                    progress: batchVideo.progress,
-                    errorMessage: batchVideo.errorMessage,
-                  })
-                : null;
-              const tone = display
-                ? getProcessingListClasses(display.tone)
-                : getPhaseClasses(item.phase);
-              const progress = Math.max(
-                0,
-                Math.min(100, display ? display.progress : item.progress)
-              );
-              const statusTitle = display
-                ? display.title
-                : getPhaseLabel(item.phase);
-              const statusDetail =
-                display?.detail ?? batchVideo?.errorMessage ?? item.message;
-              const canDownloadVideo = Boolean(batchVideo?.downloadReady);
-              const canDownloadInstructionPdf = Boolean(
-                batchVideo?.instructionPdfReady
-              );
-              const isDownloadingVideo = batchVideo?.id === downloadingVideoId;
-              const isDownloadingInstructionPdf =
-                batchVideo?.id === downloadingInstructionPdfId;
-              const canRetryProcessing = Boolean(
-                batchVideo?.status === "failed" && batchVideo.retryable
-              );
-              const isRetryingProcessing = batchVideo?.id === retryingVideoId;
-
-              return (
-                <li
-                  key={item.id}
-                  className="grid gap-4 border-t border-[#dce1ea] px-4 py-4 first:border-t-0 md:grid-cols-[minmax(0,1fr)_220px_190px_170px] md:items-center md:gap-5"
-                >
-                  <div className="grid min-w-0 grid-cols-[70px_minmax(0,1fr)] items-center gap-4">
-                    <FileThumb />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-[#11131a]">
-                        {filename}
-                      </p>
-                      <p className="mt-1 text-sm text-[#6f7785]">
-                        {formatVideoMeta(size, contentType)}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className={cx("h-2.5 w-2.5 rounded-full", tone.dot)} />
-                      <span className={cx("text-sm font-semibold", tone.text)}>
-                        {statusTitle}
-                      </span>
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-sm leading-5 text-[#6f7785]">
-                      {statusDetail}
-                    </p>
-                  </div>
-
-                  <div className="grid grid-cols-[44px_1fr] items-center gap-3">
-                    <span className="font-mono text-sm font-semibold text-[#11131a]">
-                      {item.phase === "creating" ? "-" : `${progress}%`}
-                    </span>
-                    <div className="h-2 overflow-hidden rounded-full bg-[#e2e6ed]">
-                      <div
-                        className={cx(
-                          "h-full rounded-full transition-all duration-500",
-                          tone.bar
-                        )}
-                        style={{
-                          width: `${
-                            !display && item.phase === "creating" ? 0 : progress
-                          }%`,
-                        }}
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2 md:grid">
-                    {canDownloadVideo && batchVideo && (
-                      <button
-                        type="button"
-                        onClick={() => onDownloadVideo(batchVideo.id)}
-                        disabled={isDownloadingVideo}
-                        className="h-9 rounded-md bg-[#11131a] px-3 text-sm font-semibold text-white transition hover:bg-black disabled:cursor-not-allowed disabled:bg-[#aeb7c5]"
-                      >
-                        {isDownloadingVideo ? "准备中..." : "下载最终视频"}
-                      </button>
-                    )}
-
-                    {canDownloadInstructionPdf && batchVideo && (
-                      <button
-                        type="button"
-                        onClick={() => onDownloadInstructionPdf(batchVideo.id)}
-                        disabled={isDownloadingInstructionPdf}
-                        className="h-9 rounded-md border border-[#c5ccd8] bg-white px-3 text-sm font-semibold text-[#11131a] transition hover:border-[#11131a] disabled:cursor-not-allowed disabled:text-[#8a93a3]"
-                      >
-                        {isDownloadingInstructionPdf
-                          ? "准备中..."
-                          : "下载操作 PDF"}
-                      </button>
-                    )}
-
-                    {canRetryProcessing && batchVideo && (
-                      <button
-                        type="button"
-                        onClick={() => onRetryProcessing(batchVideo.id)}
-                        disabled={isRetryingProcessing}
-                        className="h-9 rounded-md bg-[#ee2b2f] px-3 text-sm font-semibold text-white transition hover:bg-[#c81818] disabled:cursor-not-allowed disabled:bg-[#aeb7c5]"
-                      >
-                        {isRetryingProcessing ? "启动中..." : "重试处理"}
-                      </button>
-                    )}
-
-                    {!canDownloadVideo &&
-                      !canDownloadInstructionPdf &&
-                      !canRetryProcessing && (
-                        <span className="text-sm font-medium text-[#8a93a3]">
-                          等待结果
-                        </span>
-                      )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+        <UploadProgressRows
+          rows={rows}
+          batchStatus={batchStatus}
+          downloadingVideoId={downloadingVideoId}
+          downloadingInstructionPdfId={downloadingInstructionPdfId}
+          retryingVideoId={retryingVideoId}
+          onDownloadVideo={onDownloadVideo}
+          onDownloadInstructionPdf={onDownloadInstructionPdf}
+          onRetryProcessing={onRetryProcessing}
+          className="mt-3"
+        />
       </div>
     </section>
   );
