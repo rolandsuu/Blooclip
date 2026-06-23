@@ -1570,7 +1570,7 @@ export function UploadWorkspace() {
               disabled={isSubmitting}
               className="sr-only"
             />
-            将视频拖到这里
+            将视频拖到这里//点击选择视频上传
           </label>
 
           <SelectedFiles selections={selectedUploads} />
@@ -1606,7 +1606,7 @@ export function UploadWorkspace() {
               rows={4}
               required
               disabled={isSubmitting}
-              placeholder="描述你希望 Blooclip 生成什么内容..."
+              placeholder="详细描述您的视频内容，AI视频生成的效果会更好哦！"
               className="min-h-[94px] resize-none rounded-lg border border-[#c5ccd8] bg-white px-4 py-3 text-base leading-6 text-[#11131a] outline-none transition placeholder:text-[#7b8493] focus:border-[#11131a] focus:ring-4 focus:ring-[#11131a]/5 disabled:cursor-not-allowed disabled:bg-[#eef1f6] disabled:text-[#6f7785]"
             />
           </div>
