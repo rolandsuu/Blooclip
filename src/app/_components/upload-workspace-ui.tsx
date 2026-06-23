@@ -365,7 +365,7 @@ const HELP_TUTORIAL_STEPS = [
   },
   {
     title: "写提示词",
-    description: "简单说明你想让 AI 剪出什么效果。",
+    description: "写出视频内容，让 AI 剪得更好。",
     Icon: PromptStepIcon,
   },
   {
@@ -375,7 +375,7 @@ const HELP_TUTORIAL_STEPS = [
   },
   {
     title: "一键剪辑",
-    description: "等待处理完成后下载视频或操作 PDF。",
+    description: "等待处理完成后下载视频和说明书。",
     Icon: GenerateStepIcon,
   },
 ] as const;
